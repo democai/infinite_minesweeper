@@ -1,0 +1,132 @@
+package com.infinite.minesweeper.ui.game
+
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.infinite.minesweeper.core.model.GameEvent
+import com.infinite.minesweeper.ui.board.BoardEffect
+import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
+import com.infinite.minesweeper.ui.board.rememberViewportState
+import com.infinite.minesweeper.ui.hud.GameHud
+import com.infinite.minesweeper.ui.settings.SettingsRoute
+import com.infinite.minesweeper.ui.settings.TapKind
+import com.infinite.minesweeper.ui.theme.BoardPalette
+
+@Composable
+fun GameScreen(
+    viewModel: GameViewModel,
+    modifier: Modifier = Modifier,
+) {
+    val state by viewModel.state.collectAsStateWithLifecycle()
+    val viewportState = rememberViewportState()
+    var viewportRestored by rememberSaveable { mutableStateOf(false) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(state.isProcessing, viewportRestored) {
+        if (!state.isProcessing && !viewportRestored) {
+            viewportState.moveTo(
+                centerX = state.meta.viewportX.toDouble(),
+                centerY = state.meta.viewportY.toDouble(),
+                zoom = state.meta.zoom.toDouble(),
+            )
+            viewportRestored = true
+        }
+    }
+    LaunchedEffect(viewportState) {
+        snapshotFlow { Triple(viewportState.centerX, viewportState.centerY, viewportState.zoom) }
+            .collect { (x, y, zoom) -> viewModel.updateViewport(x, y, zoom) }
+    }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) viewModel.flush()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    if (showSettings) {
+        Column(modifier = modifier.fillMaxSize()) {
+            TextButton(onClick = { showSettings = false }) {
+                Text("Back to game")
+            }
+            SettingsRoute(
+                preferences = viewModel.inputBindingPreferences,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        return
+    }
+
+    val effectAlpha = remember { Animatable(0f) }
+    var effectChunk by remember { mutableStateOf<com.infinite.minesweeper.core.model.ChunkCoord?>(null) }
+    var effectColor by remember { mutableStateOf(Color.Transparent) }
+    LaunchedEffect(viewModel) {
+        viewModel.events.collect { event ->
+            val visual = when (event) {
+                is GameEvent.ChunkLocked -> Triple(event.chunk, BoardPalette.MineExploded, 0.45f)
+                is GameEvent.ChunkSoftResolved -> Triple(event.chunk, BoardPalette.AccentGold, 0.35f)
+                is GameEvent.ChunkWiped -> Triple(event.chunk, BoardPalette.WipeFlash, 0.85f)
+                is GameEvent.ChunkCleared -> null
+            } ?: return@collect
+            effectChunk = visual.first
+            effectColor = visual.second
+            effectAlpha.snapTo(visual.third)
+            effectAlpha.animateTo(0f, animationSpec = tween(durationMillis = 420))
+        }
+    }
+
+    Column(modifier = modifier.fillMaxSize()) {
+        GameHud(
+            state = state,
+            viewportCenterX = viewportState.centerX,
+            viewportCenterY = viewportState.centerY,
+        )
+        Box(modifier = Modifier.weight(1f)) {
+            ViewportBoardCanvas(
+                chunks = state.chunks.values,
+                viewportState = viewportState,
+                modifier = Modifier.fillMaxSize(),
+                onTap = { viewModel.dispatch(TapKind.TAP, it) },
+                onLongPress = { viewModel.dispatch(TapKind.LONG_PRESS, it) },
+                effect = effectChunk?.let {
+                    BoardEffect(chunk = it, color = effectColor, alpha = effectAlpha.value)
+                },
+            )
+            FloatingActionButton(
+                onClick = { showSettings = true },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                containerColor = BoardPalette.Surface,
+                contentColor = BoardPalette.AccentGold,
+            ) {
+                Text("⚙")
+            }
+        }
+    }
+}

@@ -2,6 +2,7 @@ package com.infinite.minesweeper.core.engine
 
 import com.infinite.minesweeper.core.coords.cellToChunk
 import com.infinite.minesweeper.core.coords.cellToLocalIndex
+import com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic
 import com.infinite.minesweeper.core.model.Cell
 import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
@@ -32,10 +33,9 @@ private const val EVENT_BUFFER_CAPACITY = 64
 
 /**
  * [GameEngine] implementation covering reveal, bounded flood-fill, flag toggling, chording, and
- * auto-flag-on-completion. Lock/wipe consequences of a mine hit (T9) are not implemented here;
- * this engine only performs the mechanical transition a mine reveal always causes — marking the
- * cell [CellState.EXPLODED] and the chunk [ChunkStatus.LOCKED] — and emits [GameEvent.ChunkLocked]
- * so T9's watcher can react.
+ * auto-flag-on-completion. The optional [lockAndWipeMechanic] lets the app integration layer fold
+ * T9's derived transitions back into the same authoritative state before a dispatch completes.
+ * Tests and other core-only callers can omit it and observe the original T8 transitions directly.
  *
  * [GameState.chunks] is this engine's entire notion of the board: every chunk it has ever touched,
  * not merely a viewport window. Bounding that window to conserve memory (T7's cache) and
@@ -46,6 +46,7 @@ private const val EVENT_BUFFER_CAPACITY = 64
 class DefaultGameEngine(
     private val mineGenerator: MineGenerator,
     initialState: GameState = GameState(),
+    private val lockAndWipeMechanic: LockAndWipeMechanic? = null,
     private val backgroundDispatcher: CoroutineDispatcher = Dispatchers.Default,
     private val cascadeRadiusChunks: Int = DEFAULT_CASCADE_RADIUS_CHUNKS,
     private val batchSize: Int = DEFAULT_BATCH_SIZE,
@@ -64,6 +65,7 @@ class DefaultGameEngine(
         dispatchMutex.withLock {
             withContext(backgroundDispatcher) {
                 val snapshot = _state.value
+                val pendingEvents = mutableListOf<GameEvent>()
                 val session = EngineSession(
                     chunks = snapshot.chunks.toMutableMap(),
                     meta = snapshot.meta,
@@ -74,7 +76,7 @@ class DefaultGameEngine(
                     publish = { chunks, meta ->
                         _state.value = GameState(chunks = chunks, meta = meta, isProcessing = true)
                     },
-                    emit = { event -> _events.emit(event) },
+                    emit = { event -> pendingEvents += event },
                 )
 
                 when (action) {
@@ -83,11 +85,18 @@ class DefaultGameEngine(
                     is GameAction.Chord -> session.chord(action.cell)
                 }
 
-                _state.value = GameState(
+                var integratedState = GameState(
                     chunks = session.chunks.toMap(),
                     meta = session.meta,
                     isProcessing = false,
                 )
+                for (event in pendingEvents) {
+                    val transition = lockAndWipeMechanic?.process(event, integratedState)
+                    if (transition != null) integratedState = transition.state
+                    _events.emit(event)
+                    transition?.events?.forEach { _events.emit(it) }
+                }
+                _state.value = integratedState.copy(isProcessing = false)
             }
         }
     }

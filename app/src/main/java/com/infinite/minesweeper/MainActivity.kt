@@ -8,7 +8,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.infinite.minesweeper.ui.game.GameScreen
+import com.infinite.minesweeper.ui.game.GameViewModel
 import com.infinite.minesweeper.ui.theme.InfiniteMinesweeperTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -24,16 +26,10 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun AppRoot() {
+fun AppRoot(viewModel: GameViewModel = hiltViewModel()) {
     InfiniteMinesweeperTheme {
         Surface(modifier = Modifier.fillMaxSize()) {
-            // T0 placeholder: blank dark board surface.
+            GameScreen(viewModel = viewModel)
         }
     }
-}
-
-@Preview(showBackground = true)
-@Composable
-private fun AppRootPreview() {
-    AppRoot()
 }

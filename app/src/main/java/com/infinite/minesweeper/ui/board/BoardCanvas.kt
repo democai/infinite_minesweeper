@@ -2,12 +2,17 @@ package com.infinite.minesweeper.ui.board
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextMeasurer
@@ -18,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.infinite.minesweeper.core.model.CELLS_PER_CHUNK
 import com.infinite.minesweeper.core.model.CHUNK_SIDE_LENGTH
 import com.infinite.minesweeper.core.model.Cell
+import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
 import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
@@ -27,6 +33,7 @@ import com.infinite.minesweeper.ui.theme.BoardPalette
 import com.infinite.minesweeper.ui.theme.CellDigitSizeFraction
 import com.infinite.minesweeper.ui.theme.InfiniteMinesweeperTheme
 import kotlin.math.min
+import kotlin.math.floor
 
 /**
  * T6 visual fixture. It intentionally has no gestures or viewport state.
@@ -106,6 +113,9 @@ fun ViewportBoardCanvas(
     chunks: Collection<Chunk>,
     viewportState: ViewportState,
     modifier: Modifier = Modifier,
+    onTap: (CellCoord) -> Unit = {},
+    onLongPress: (CellCoord) -> Unit = {},
+    effect: BoardEffect? = null,
 ) {
     val density = LocalDensity.current
     val textMeasurer = rememberTextMeasurer(cacheSize = 8)
@@ -132,26 +142,92 @@ fun ViewportBoardCanvas(
             numberLayouts = numberLayouts,
         )
     }
+    val lodBitmaps = remember { mutableMapOf<ChunkCoord, Pair<Chunk, ImageBitmap>>() }
+    val visibleCoordinates = visibleChunks.mapTo(hashSetOf()) { it.coord }
+    lodBitmaps.keys.retainAll(visibleCoordinates)
+    if (LodRenderer.shouldUseLod(cellSize.value)) {
+        visibleChunks.forEach { chunk ->
+            if (lodBitmaps[chunk.coord]?.first != chunk) {
+                lodBitmaps[chunk.coord] = chunk to LodRenderer.bakeImageBitmap(chunk)
+            }
+        }
+    }
 
     Canvas(
         modifier = modifier
             .background(BoardPalette.Background)
+            .boardInputGestures(viewportState, onTap, onLongPress)
             .viewportGestures(viewportState),
     ) {
         val screenCenterX = size.width * 0.5f
         val screenCenterY = size.height * 0.5f
         for (chunkIndex in visibleChunks.indices) {
-            drawViewportChunk(
-                chunk = visibleChunks[chunkIndex],
-                viewportCenterX = viewportState.centerX,
-                viewportCenterY = viewportState.centerY,
-                screenCenterX = screenCenterX,
-                screenCenterY = screenCenterY,
-                cellSizePx = cellSizePx,
-                cellDrawer = cellDrawer,
-            )
+            val chunk = visibleChunks[chunkIndex]
+            val chunkLeft = screenCenterX +
+                ((chunk.coord.cx.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerX) * cellSizePx).toFloat()
+            val chunkTop = screenCenterY +
+                ((chunk.coord.cy.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerY) * cellSizePx).toFloat()
+            if (LodRenderer.shouldUseLod(cellSize.value)) {
+                lodBitmaps[chunk.coord]?.second?.let { bitmap ->
+                    with(LodRenderer) {
+                        drawLodChunk(
+                            bitmap = bitmap,
+                            left = chunkLeft,
+                            top = chunkTop,
+                            sizePx = CHUNK_SIDE_LENGTH * cellSizePx,
+                        )
+                    }
+                }
+            } else {
+                drawViewportChunk(
+                    chunk = chunk,
+                    viewportCenterX = viewportState.centerX,
+                    viewportCenterY = viewportState.centerY,
+                    screenCenterX = screenCenterX,
+                    screenCenterY = screenCenterY,
+                    cellSizePx = cellSizePx,
+                    cellDrawer = cellDrawer,
+                )
+            }
+            if (effect?.chunk == chunk.coord && effect.alpha > 0f) {
+                drawRect(
+                    color = effect.color,
+                    topLeft = Offset(chunkLeft, chunkTop),
+                    size = androidx.compose.ui.geometry.Size(
+                        CHUNK_SIDE_LENGTH * cellSizePx,
+                        CHUNK_SIDE_LENGTH * cellSizePx,
+                    ),
+                    alpha = effect.alpha,
+                )
+            }
         }
     }
+}
+
+data class BoardEffect(
+    val chunk: ChunkCoord,
+    val color: Color,
+    val alpha: Float,
+)
+
+private fun Modifier.boardInputGestures(
+    viewportState: ViewportState,
+    onTap: (CellCoord) -> Unit,
+    onLongPress: (CellCoord) -> Unit,
+): Modifier = pointerInput(viewportState, onTap, onLongPress) {
+    fun Offset.toCell(): CellCoord {
+        val pixelsPerCell = BoardDimens.BaseCellSizeDp.dp.toPx() * viewportState.zoom
+        val worldX = viewportState.centerX + (x - size.width / 2.0) / pixelsPerCell
+        val worldY = viewportState.centerY + (y - size.height / 2.0) / pixelsPerCell
+        return CellCoord(
+            x = floor(worldX).toLong().coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt(),
+            y = floor(worldY).toLong().coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt(),
+        )
+    }
+    detectTapGestures(
+        onTap = { onTap(it.toCell()) },
+        onLongPress = { onLongPress(it.toCell()) },
+    )
 }
 
 @Composable
