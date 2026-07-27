@@ -1,0 +1,135 @@
+package com.infinite.minesweeper.core.generation
+
+import com.infinite.minesweeper.core.coords.cellToChunk
+import com.infinite.minesweeper.core.coords.cellToLocalIndex
+import com.infinite.minesweeper.core.model.Cell
+import com.infinite.minesweeper.core.model.CellCoord
+import com.infinite.minesweeper.core.model.CellState
+import com.infinite.minesweeper.core.model.Chunk
+import com.infinite.minesweeper.core.model.ChunkCoord
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class SeededMineGeneratorTest {
+    @Test
+    fun fixedSeedIsDeterministicAndGeneratesLazyNeighbors() = runTest {
+        val first = SeededMineGenerator(seed = 8675309L)
+            .generateForFirstTouch(CellCoord(2, 3), emptyMap())
+        val second = SeededMineGenerator(seed = 8675309L)
+            .generateForFirstTouch(CellCoord(2, 3), emptyMap())
+
+        assertEquals(first, second)
+        assertEquals(9, first.chunks.size)
+        assertEquals(
+            (-1..1).flatMap { cy -> (-1..1).map { cx -> ChunkCoord(cx, cy) } }.toSet(),
+            first.chunks.keys,
+        )
+        assertTrue(first.chunks.values.all(Chunk::generated))
+    }
+
+    @Test
+    fun safeZoneNeverContainsMineEvenAcrossChunkBoundary() = runTest {
+        val touch = CellCoord(7, 7)
+        val result = SeededMineGenerator(seed = 42L)
+            .generateForFirstTouch(touch, emptyMap())
+
+        for (y in 6..8) {
+            for (x in 6..8) {
+                val cell = CellCoord(x, y)
+                val chunk = requireNotNull(result.chunks[cellToChunk(cell)])
+                assertFalse("Expected $cell to be safe", chunk.cells[cellToLocalIndex(cell)].isMine)
+            }
+        }
+    }
+
+    @Test
+    fun densityUsesChebyshevDistanceAndCaps() {
+        val generator = SeededMineGenerator(seed = 0L)
+
+        assertEquals(0.156f, generator.mineDensityFor(ChunkCoord(0, 0)), 0.000001f)
+        assertEquals(0.256f, generator.mineDensityFor(ChunkCoord(-10, 4)), 0.000001f)
+        assertEquals(0.35f, generator.mineDensityFor(ChunkCoord(12, 50)), 0.000001f)
+        assertEquals(
+            0.35f,
+            generator.mineDensityFor(ChunkCoord(Int.MIN_VALUE, 0)),
+            0.000001f,
+        )
+    }
+
+    @Test
+    fun adjacencyCountsMinesAcrossThreeByThreeChunkFixture() {
+        val chunks = (-1..1).flatMap { cy ->
+            (-1..1).map { cx -> generatedChunk(ChunkCoord(cx, cy)) }
+        }.associateBy(Chunk::coord).toMutableMap()
+        chunks[ChunkCoord(0, 0)] = chunks.getValue(ChunkCoord(0, 0))
+            .withMine(CellCoord(6, 6))
+        chunks[ChunkCoord(1, 0)] = chunks.getValue(ChunkCoord(1, 0))
+            .withMine(CellCoord(8, 7))
+        chunks[ChunkCoord(0, 1)] = chunks.getValue(ChunkCoord(0, 1))
+            .withMine(CellCoord(7, 8))
+        chunks[ChunkCoord(1, 1)] = chunks.getValue(ChunkCoord(1, 1))
+            .withMine(CellCoord(8, 8))
+
+        val result = recomputeAdjacency(chunks)
+
+        assertEquals(4, result.cellAt(CellCoord(7, 7)).adjacentMines)
+        assertEquals(2, result.cellAt(CellCoord(7, 6)).adjacentMines)
+        assertEquals(2, result.cellAt(CellCoord(6, 7)).adjacentMines)
+        assertEquals(0, result.cellAt(CellCoord(-8, -8)).adjacentMines)
+    }
+
+    @Test
+    fun generatingBeyondExistingFrontierPatchesOldBoundaryNumbers() = runTest {
+        val generator = SeededMineGenerator(seed = 1234L)
+        val initial = generator.generateForFirstTouch(CellCoord(0, 0), emptyMap()).chunks
+        val staleBoundary = initial.getValue(ChunkCoord(1, 0))
+        val expanded = generator.generateForFirstTouch(CellCoord(15, 0), initial)
+
+        assertTrue(ChunkCoord(2, 0) in expanded.chunks)
+        val merged = initial + expanded.chunks
+        val expected = recomputeAdjacency(merged).getValue(ChunkCoord(1, 0))
+        assertEquals(expected, merged.getValue(ChunkCoord(1, 0)))
+        assertTrue(
+            expanded.chunks[ChunkCoord(1, 0)] == null ||
+                expanded.chunks.getValue(ChunkCoord(1, 0)) != staleBoundary,
+        )
+    }
+
+    @Test
+    fun rerollIsDeterministicAndPatchesNeighborBorder() = runTest {
+        val generator = SeededMineGenerator(seed = 999L)
+        val known = generator.generateForFirstTouch(CellCoord(0, 0), emptyMap()).chunks
+
+        val first = generator.reroll(ChunkCoord(0, 0), known)
+        val second = generator.reroll(ChunkCoord(0, 0), known)
+
+        assertEquals(first, second)
+        assertTrue(
+            first.chunks.getValue(ChunkCoord(0, 0)).cells.all {
+                it.state == CellState.HIDDEN
+            },
+        )
+        val merged = known + first.chunks
+        assertEquals(
+            recomputeAdjacency(merged).filterKeys { it in first.chunks },
+            first.chunks,
+        )
+    }
+
+    private fun generatedChunk(coord: ChunkCoord): Chunk = Chunk(
+        coord = coord,
+        generated = true,
+    )
+
+    private fun Chunk.withMine(cell: CellCoord): Chunk {
+        val cells = cells.toMutableList()
+        cells[cellToLocalIndex(cell)] = cells[cellToLocalIndex(cell)].copy(isMine = true)
+        return copy(cells = cells)
+    }
+
+    private fun Map<ChunkCoord, Chunk>.cellAt(coord: CellCoord): Cell =
+        getValue(cellToChunk(coord)).cells[cellToLocalIndex(coord)]
+}

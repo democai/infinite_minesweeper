@@ -4,11 +4,13 @@ import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkRepository
 import com.infinite.minesweeper.core.model.GameMeta
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -20,6 +22,8 @@ import kotlinx.coroutines.withContext
  * [saveChunk], [saveChunks], and [saveGameMeta] enqueue on the caller's thread (main-safe).
  * Durable IO runs on [ioDispatcher] after [debounceMs] of quiet time, or immediately on [flush].
  * Reads prefer queued values so callers observe their own writes before debounce fires.
+ *
+ * @param delayMillis suspend sleeper used by the debounce timer (overridable in tests).
  */
 class RoomChunkRepository(
     private val chunkDao: ChunkDao,
@@ -27,12 +31,13 @@ class RoomChunkRepository(
     private val scope: CoroutineScope,
     private val ioDispatcher: CoroutineDispatcher,
     private val debounceMs: Long = DEFAULT_DEBOUNCE_MS,
+    private val delayMillis: suspend (Long) -> Unit = { delay(it) },
 ) : ChunkRepository {
     private val queueMutex = Mutex()
     private val persistMutex = Mutex()
     private val pendingChunks = linkedMapOf<ChunkCoord, Chunk>()
     private var pendingMeta: GameMeta? = null
-    private var debounceJob: Job? = null
+    private val debounceJob = AtomicReference<Job?>(null)
 
     /** Counts durable chunk upsert batches; useful for debounce coalescing tests. */
     @Volatile
@@ -42,6 +47,11 @@ class RoomChunkRepository(
     /** Counts durable meta upserts; useful for debounce coalescing tests. */
     @Volatile
     var metaWriteCount: Int = 0
+        private set
+
+    /** Last unexpected debounce failure, if any (tests assert this stays null). */
+    @Volatile
+    var lastDebounceError: Throwable? = null
         private set
 
     override suspend fun getChunk(coord: ChunkCoord): Chunk? {
@@ -89,8 +99,8 @@ class RoomChunkRepository(
     override suspend fun saveChunk(chunk: Chunk) {
         queueMutex.withLock {
             pendingChunks[chunk.coord] = chunk
-            scheduleDebouncedFlushLocked()
         }
+        scheduleDebouncedFlush()
     }
 
     override suspend fun saveChunks(chunks: Collection<Chunk>) {
@@ -99,8 +109,8 @@ class RoomChunkRepository(
             for (chunk in chunks) {
                 pendingChunks[chunk.coord] = chunk
             }
-            scheduleDebouncedFlushLocked()
         }
+        scheduleDebouncedFlush()
     }
 
     override suspend fun getGameMeta(): GameMeta? {
@@ -115,27 +125,33 @@ class RoomChunkRepository(
     override suspend fun saveGameMeta(meta: GameMeta) {
         queueMutex.withLock {
             pendingMeta = meta
-            scheduleDebouncedFlushLocked()
         }
+        scheduleDebouncedFlush()
     }
 
     override suspend fun flush() {
-        val job = queueMutex.withLock {
-            val current = debounceJob
-            debounceJob = null
-            current
+        debounceJob.getAndSet(null)?.let { job ->
+            job.cancel()
+            job.join()
         }
-        job?.cancel()
-        job?.join()
         persistPending()
     }
 
-    private fun scheduleDebouncedFlushLocked() {
-        debounceJob?.cancel()
-        debounceJob = scope.launch {
-            delay(debounceMs)
-            persistPending()
-        }
+    private fun scheduleDebouncedFlush() {
+        debounceJob.getAndSet(
+            scope.launch {
+                try {
+                    delayMillis(debounceMs)
+                    ensureActive()
+                    persistPending()
+                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    lastDebounceError = error
+                    throw error
+                }
+            },
+        )?.cancel()
     }
 
     private suspend fun persistPending() {
@@ -143,30 +159,33 @@ class RoomChunkRepository(
             val chunksSnapshot: List<Chunk>
             val metaSnapshot: GameMeta?
             queueMutex.withLock {
-                if (pendingChunks.isEmpty() && pendingMeta == null) return
+                if (pendingChunks.isEmpty() && pendingMeta == null) {
+                    return
+                }
                 chunksSnapshot = pendingChunks.values.toList()
                 metaSnapshot = pendingMeta
             }
 
-            withContext(ioDispatcher + NonCancellable) {
-                if (chunksSnapshot.isNotEmpty()) {
-                    chunkDao.upsertAll(chunksSnapshot.map(ChunkMapper::toEntity))
-                    chunkWriteBatchCount++
-                }
-                if (metaSnapshot != null) {
-                    gameMetaDao.upsert(ChunkMapper.toEntity(metaSnapshot))
-                    metaWriteCount++
-                }
-            }
-
-            queueMutex.withLock {
-                for (chunk in chunksSnapshot) {
-                    if (pendingChunks[chunk.coord] == chunk) {
-                        pendingChunks.remove(chunk.coord)
+            withContext(NonCancellable) {
+                withContext(ioDispatcher) {
+                    if (chunksSnapshot.isNotEmpty()) {
+                        chunkDao.upsertAll(chunksSnapshot.map(ChunkMapper::toEntity))
+                        chunkWriteBatchCount++
+                    }
+                    if (metaSnapshot != null) {
+                        gameMetaDao.upsert(ChunkMapper.toEntity(metaSnapshot))
+                        metaWriteCount++
                     }
                 }
-                if (metaSnapshot != null && pendingMeta == metaSnapshot) {
-                    pendingMeta = null
+                queueMutex.withLock {
+                    for (chunk in chunksSnapshot) {
+                        if (pendingChunks[chunk.coord] == chunk) {
+                            pendingChunks.remove(chunk.coord)
+                        }
+                    }
+                    if (metaSnapshot != null && pendingMeta == metaSnapshot) {
+                        pendingMeta = null
+                    }
                 }
             }
         }

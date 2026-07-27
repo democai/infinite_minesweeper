@@ -9,10 +9,12 @@ import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameMeta
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.TestScope
-import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -30,9 +32,6 @@ import org.robolectric.annotation.Config
 @Config(sdk = [35])
 class RoomChunkRepositoryTest {
     private lateinit var database: MinesweeperDatabase
-    private lateinit var testDispatcher: StandardTestDispatcher
-    private lateinit var testScope: TestScope
-    private lateinit var repository: RoomChunkRepository
 
     @Before
     fun setUp() {
@@ -40,15 +39,6 @@ class RoomChunkRepositoryTest {
         database = Room.inMemoryDatabaseBuilder(context, MinesweeperDatabase::class.java)
             .allowMainThreadQueries()
             .build()
-        testDispatcher = StandardTestDispatcher()
-        testScope = TestScope(testDispatcher)
-        repository = RoomChunkRepository(
-            chunkDao = database.chunkDao(),
-            gameMetaDao = database.gameMetaDao(),
-            scope = testScope,
-            ioDispatcher = testDispatcher,
-            debounceMs = 500L,
-        )
     }
 
     @After
@@ -57,7 +47,9 @@ class RoomChunkRepositoryTest {
     }
 
     @Test
-    fun upsertAndReadChunk_roundTripsThroughRoom() = testScope.runTest {
+    fun upsertAndReadChunk_roundTripsThroughRoom() = runTest {
+        val hang = CompletableDeferred<Unit>()
+        val repository = newRepository(delayMillis = { hang.await() })
         val chunk = sampleChunk(
             coord = ChunkCoord(cx = -3, cy = 2),
             cellIndex = 0,
@@ -75,7 +67,9 @@ class RoomChunkRepositoryTest {
     }
 
     @Test
-    fun getChunks_filtersCartesianExtrasFromInQuery() = testScope.runTest {
+    fun getChunks_filtersCartesianExtrasFromInQuery() = runTest {
+        val hang = CompletableDeferred<Unit>()
+        val repository = newRepository(delayMillis = { hang.await() })
         val wanted = listOf(
             sampleChunk(ChunkCoord(1, 2)),
             sampleChunk(ChunkCoord(3, 4)),
@@ -91,7 +85,9 @@ class RoomChunkRepositoryTest {
     }
 
     @Test
-    fun metaRoundTrip_persistsViewportAndCounters() = testScope.runTest {
+    fun metaRoundTrip_persistsViewportAndCounters() = runTest {
+        val hang = CompletableDeferred<Unit>()
+        val repository = newRepository(delayMillis = { hang.await() })
         val meta = GameMeta(
             flagsPlaced = 12,
             selectorsCleared = 3,
@@ -110,32 +106,79 @@ class RoomChunkRepositoryTest {
     }
 
     @Test
-    fun debounce_coalescesRapidChunkWritesIntoOneBatch() = testScope.runTest {
-        val coord = ChunkCoord(0, 0)
-        repeat(5) { version ->
-            repository.saveChunk(
-                sampleChunk(
-                    coord = coord,
-                    cellIndex = version,
-                    cell = Cell(state = CellState.FLAGGED, adjacentMines = version),
-                ),
-            )
+    fun debounce_timerFiresPersistAfterDelayGateOpens() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val job = Job()
+        val repository = RoomChunkRepository(
+            chunkDao = database.chunkDao(),
+            gameMetaDao = database.gameMetaDao(),
+            scope = CoroutineScope(Dispatchers.Unconfined + job),
+            ioDispatcher = Dispatchers.Unconfined,
+            debounceMs = 500L,
+            delayMillis = { gate.await() },
+        )
+        try {
+            val chunk = sampleChunk(ChunkCoord(0, 0), generated = true)
+            repository.saveChunk(chunk)
+            assertEquals(0, repository.chunkWriteBatchCount)
+
+            gate.complete(Unit)
+
+            assertEquals(null, repository.lastDebounceError)
+            assertEquals(1, repository.chunkWriteBatchCount)
+            assertEquals(chunk, repository.getChunk(chunk.coord))
+        } finally {
+            job.cancel()
         }
-
-        advanceTimeBy(499)
-        assertEquals(0, repository.chunkWriteBatchCount)
-
-        advanceTimeBy(1)
-        advanceUntilIdle()
-
-        assertEquals(1, repository.chunkWriteBatchCount)
-        val persisted = repository.getChunk(coord)
-        assertEquals(CellState.FLAGGED, persisted!!.cells[4].state)
-        assertEquals(4, persisted.cells[4].adjacentMines)
     }
 
     @Test
-    fun flush_drainsQueueBeforeDebounceElapses() = testScope.runTest {
+    fun debounce_coalescesRapidChunkWritesIntoOneBatch() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var delayEntries = 0
+        val job = Job()
+        val repository = RoomChunkRepository(
+            chunkDao = database.chunkDao(),
+            gameMetaDao = database.gameMetaDao(),
+            scope = CoroutineScope(Dispatchers.Unconfined + job),
+            ioDispatcher = Dispatchers.Unconfined,
+            debounceMs = 500L,
+            delayMillis = {
+                delayEntries++
+                gate.await()
+            },
+        )
+        try {
+            val coord = ChunkCoord(0, 0)
+
+            repeat(5) { version ->
+                repository.saveChunk(
+                    sampleChunk(
+                        coord = coord,
+                        cellIndex = version,
+                        cell = Cell(state = CellState.FLAGGED, adjacentMines = version),
+                    ),
+                )
+            }
+
+            assertEquals(5, delayEntries)
+            assertEquals(0, repository.chunkWriteBatchCount)
+
+            gate.complete(Unit)
+
+            assertEquals(1, repository.chunkWriteBatchCount)
+            val persisted = repository.getChunk(coord)
+            assertEquals(CellState.FLAGGED, persisted!!.cells[4].state)
+            assertEquals(4, persisted.cells[4].adjacentMines)
+        } finally {
+            job.cancel()
+        }
+    }
+
+    @Test
+    fun flush_drainsQueueBeforeDebounceElapses() = runTest {
+        val hang = CompletableDeferred<Unit>()
+        val repository = newRepository(delayMillis = { hang.await() })
         val meta = GameMeta(flagsPlaced = 7, zoom = 2f)
         val chunk = sampleChunk(ChunkCoord(9, -1), generated = true)
 
@@ -151,20 +194,16 @@ class RoomChunkRepositoryTest {
         assertEquals(1, repository.chunkWriteBatchCount)
         assertEquals(1, repository.metaWriteCount)
 
-        // A fresh repository instance must see durable rows (no pending queue).
-        val cold = RoomChunkRepository(
-            chunkDao = database.chunkDao(),
-            gameMetaDao = database.gameMetaDao(),
-            scope = testScope,
-            ioDispatcher = testDispatcher,
-            debounceMs = 500L,
-        )
+        val coldHang = CompletableDeferred<Unit>()
+        val cold = newRepository(delayMillis = { coldHang.await() })
         assertEquals(chunk, cold.getChunk(chunk.coord))
         assertEquals(meta, cold.getGameMeta())
     }
 
     @Test
-    fun saveChunk_readYourWritesBeforeFlush() = testScope.runTest {
+    fun saveChunk_readYourWritesBeforeFlush() = runTest {
+        val hang = CompletableDeferred<Unit>()
+        val repository = newRepository(delayMillis = { hang.await() })
         val chunk = sampleChunk(
             coord = ChunkCoord(5, 5),
             status = ChunkStatus.LOCKED,
@@ -179,12 +218,14 @@ class RoomChunkRepositoryTest {
     }
 
     @Test
-    fun getChunk_returnsNullWhenMissing() = testScope.runTest {
-        assertNull(repository.getChunk(ChunkCoord(99, 99)))
+    fun getChunk_returnsNullWhenMissing() = runTest {
+        assertNull(newRepository().getChunk(ChunkCoord(99, 99)))
     }
 
     @Test
-    fun lockedChunk_roundTripsStatusAndLockedAt() = testScope.runTest {
+    fun lockedChunk_roundTripsStatusAndLockedAt() = runTest {
+        val hang = CompletableDeferred<Unit>()
+        val repository = newRepository(delayMillis = { hang.await() })
         val chunk = sampleChunk(
             coord = ChunkCoord(0, 1),
             status = ChunkStatus.LOCKED,
@@ -200,6 +241,18 @@ class RoomChunkRepositoryTest {
         assertEquals(99L, loaded.lockedAt)
         assertTrue(loaded.generated)
     }
+
+    private fun TestScope.newRepository(
+        delayMillis: suspend (Long) -> Unit = { CompletableDeferred<Unit>().await() },
+    ): RoomChunkRepository =
+        RoomChunkRepository(
+            chunkDao = database.chunkDao(),
+            gameMetaDao = database.gameMetaDao(),
+            scope = backgroundScope,
+            ioDispatcher = Dispatchers.Unconfined,
+            debounceMs = 500L,
+            delayMillis = delayMillis,
+        )
 
     private fun sampleChunk(
         coord: ChunkCoord,
