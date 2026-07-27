@@ -21,11 +21,13 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.infinite.minesweeper.core.cache.DEFAULT_RETENTION_MARGIN_CHUNKS
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.ui.board.BoardEffect
 import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
@@ -33,7 +35,11 @@ import com.infinite.minesweeper.ui.board.rememberViewportState
 import com.infinite.minesweeper.ui.hud.GameHud
 import com.infinite.minesweeper.ui.settings.SettingsRoute
 import com.infinite.minesweeper.ui.settings.TapKind
+import com.infinite.minesweeper.ui.theme.BoardDimens
 import com.infinite.minesweeper.ui.theme.BoardPalette
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
 
 @Composable
 fun GameScreen(
@@ -58,6 +64,24 @@ fun GameScreen(
     LaunchedEffect(viewportState) {
         snapshotFlow { Triple(viewportState.centerX, viewportState.centerY, viewportState.zoom) }
             .collect { (x, y, zoom) -> viewModel.updateViewport(x, y, zoom) }
+    }
+
+    val density = LocalDensity.current
+    LaunchedEffect(viewportState, density) {
+        val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
+        snapshotFlow {
+            // Null until the canvas has been laid out at least once (viewport size still 0x0).
+            // An empty window would otherwise be indistinguishable from "nothing to keep" and
+            // wipe every chunk the engine holds before the player ever sees the board.
+            viewportState.visibleChunkBounds(
+                baseCellSizePx = baseCellSizePx,
+                renderMarginChunks = DEFAULT_RETENTION_MARGIN_CHUNKS,
+            )
+        }
+            .filterNotNull()
+            .map { it.toSet() }
+            .distinctUntilChanged()
+            .collect { window -> viewModel.syncVisibleWindow(window) }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current

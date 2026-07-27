@@ -206,6 +206,62 @@ class DefaultGameEngineTest {
         assertEquals(0, engine.state.value.meta.flagsPlaced)
     }
 
+    @Test
+    fun syncWindowTrimsChunksOutsideKeepAndMergesHydratedChunks() = runTest {
+        val kept = chunkWithMines(ChunkCoord(0, 0), emptySet())
+        val evicted = chunkWithMines(ChunkCoord(5, 5), emptySet())
+        val engine = DefaultGameEngine(
+            mineGenerator = FixtureMineGenerator(emptyMap()),
+            initialState = GameState(chunks = mapOf(kept.coord to kept, evicted.coord to evicted)),
+            backgroundDispatcher = Dispatchers.Unconfined,
+        )
+        val rehydrated = chunkWithMines(ChunkCoord(9, 9), emptySet())
+            .withState(0, 0, CellState.REVEALED)
+
+        engine.syncWindow(
+            keep = setOf(kept.coord, rehydrated.coord),
+            hydrated = mapOf(rehydrated.coord to rehydrated),
+        )
+
+        val chunks = engine.state.value.chunks
+        assertEquals(setOf(kept.coord, rehydrated.coord), chunks.keys)
+        assertEquals(kept, chunks.getValue(kept.coord))
+        assertEquals(rehydrated, chunks.getValue(rehydrated.coord))
+    }
+
+    @Test
+    fun syncWindowRestoresAnEvictedChunkWithoutRegeneratingIt() = runTest {
+        // A chunk with real progress (a revealed cell) that gets evicted and later panned back
+        // into must come back exactly as it was, not as a fresh first-touch roll: dispatching
+        // into a chunk absent from the live map is indistinguishable from "never touched" to the
+        // engine (see `ensureGenerated`), so the integration layer must rehydrate before dispatch.
+        var chunk = chunkWithMines(ChunkCoord(2, 2), setOf(7 to 7))
+        chunk = chunk.withState(0, 0, CellState.REVEALED)
+        val engine = DefaultGameEngine(
+            mineGenerator = FixtureMineGenerator(mapOf(chunk.coord to chunk)),
+            initialState = GameState(chunks = mapOf(chunk.coord to chunk)),
+            backgroundDispatcher = Dispatchers.Unconfined,
+        )
+
+        engine.syncWindow(keep = emptySet())
+        assertTrue(engine.state.value.chunks.isEmpty())
+
+        engine.syncWindow(keep = setOf(chunk.coord), hydrated = mapOf(chunk.coord to chunk))
+        engine.dispatch(GameAction.Reveal(CellCoord(2 * 8 + 1, 2 * 8 + 0)))
+
+        val result = engine.state.value.chunks.getValue(chunk.coord)
+        assertTrue(result.generated)
+        assertEquals(CellState.REVEALED, stateAt(result, 0, 0))
+        assertEquals(CellState.REVEALED, stateAt(result, 1, 0))
+        // The chunk's single mine was planted at (7,7) before eviction. The zero-adjacency
+        // cascade from an unrelated corner floods the rest of the chunk and auto-flags it, which
+        // only lands on (7,7) if the pre-eviction layout survived rehydration intact. A re-roll
+        // would put the mine somewhere else and this cascade would detonate it instead.
+        assertEquals(CellState.FLAGGED, stateAt(result, 7, 7))
+        assertEquals(1, result.cells.count { it.state == CellState.FLAGGED })
+        assertEquals(0, result.cells.count { it.state == CellState.EXPLODED })
+    }
+
     private fun engineWithChunk(chunk: Chunk, cascadeRadiusChunks: Int): DefaultGameEngine =
         DefaultGameEngine(
             mineGenerator = FixtureMineGenerator(mapOf(chunk.coord to chunk)),

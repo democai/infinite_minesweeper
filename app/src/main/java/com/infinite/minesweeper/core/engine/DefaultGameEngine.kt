@@ -61,6 +61,27 @@ class DefaultGameEngine(
     private val _events = MutableSharedFlow<GameEvent>(extraBufferCapacity = EVENT_BUFFER_CAPACITY)
     override val events: SharedFlow<GameEvent> = _events.asSharedFlow()
 
+    /**
+     * Bounds the live [state] chunk map to [keep], folding in [hydrated] for any newly retained
+     * coordinate this engine has not seen yet. This is how the integration layer (T13) keeps a
+     * long panning session's memory bounded: [GameState.chunks] otherwise only ever grows (see
+     * the class doc). Shares [dispatchMutex] with [dispatch] so a trim can never interleave with
+     * an in-flight action and split a cascade's chunk map across two inconsistent snapshots.
+     *
+     * Callers must durably save any chunk being dropped (its coordinate absent from [keep])
+     * before calling this, since a chunk this engine has never touched is indistinguishable from
+     * one it touched and forgot: dropping a generated chunk without saving it first would make a
+     * later [GameAction] targeting it look first-touch and re-roll a fresh layout over the lost
+     * one.
+     */
+    suspend fun syncWindow(keep: Set<ChunkCoord>, hydrated: Map<ChunkCoord, Chunk> = emptyMap()) {
+        dispatchMutex.withLock {
+            val current = _state.value
+            val trimmed = current.chunks.filterKeys { it in keep }
+            _state.value = current.copy(chunks = trimmed + hydrated)
+        }
+    }
+
     override suspend fun dispatch(action: GameAction) {
         dispatchMutex.withLock {
             withContext(backgroundDispatcher) {

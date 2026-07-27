@@ -9,6 +9,7 @@ import com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic
 import com.infinite.minesweeper.core.generation.SeededMineGenerator
 import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
+import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkRepository
 import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameEvent
@@ -86,7 +87,8 @@ class GameViewModel @Inject constructor(
 
     fun dispatch(gesture: TapKind, cell: CellCoord) {
         val current = _state.value
-        val chunk = current.chunks[cellToChunk(cell)]
+        val coord = cellToChunk(cell)
+        val chunk = current.chunks[coord]
         if (current.isProcessing || chunk?.status == ChunkStatus.LOCKED) return
         val cellState = chunk
             ?.takeIf { it.generated }
@@ -96,7 +98,21 @@ class GameViewModel @Inject constructor(
             ?: CellState.HIDDEN
         val action = InputActionMapper.map(gesture, cell, cellState, binding) ?: return
         val activeEngine = engine ?: return
-        viewModelScope.launch { activeEngine.dispatch(action) }
+        viewModelScope.launch {
+            // The tapped chunk may have been evicted by syncVisibleWindow (e.g. a fast pan
+            // followed immediately by a tap, before the viewport-driven rehydration lands).
+            // Rehydrate it from storage first so the engine never mistakes an evicted,
+            // already-generated chunk for a brand-new one and re-rolls its layout.
+            if (chunk == null && activeEngine.state.value.chunks[coord] == null) {
+                repository.getChunk(coord)?.let { persisted ->
+                    activeEngine.syncWindow(
+                        keep = activeEngine.state.value.chunks.keys + coord,
+                        hydrated = mapOf(coord to persisted),
+                    )
+                }
+            }
+            activeEngine.dispatch(action)
+        }
     }
 
     fun updateViewport(centerX: Double, centerY: Double, zoom: Double) {
@@ -105,6 +121,27 @@ class GameViewModel @Inject constructor(
             centerY = centerY.toFloat(),
             zoom = zoom.toFloat(),
         )
+    }
+
+    /**
+     * Bounds the engine's live chunk map to [keep] as the viewport pans, so a long session
+     * exploring outward does not keep every chunk it has ever touched resident in memory (plan
+     * §9, dev tree T7/T13). Evicted chunks are saved through the repository's write-behind queue
+     * before being dropped so [dispatch]'s rehydrate-on-tap fallback and a later re-visit both see
+     * their latest state, independent of [GamePersistenceCoordinator]'s own diff timing.
+     */
+    fun syncVisibleWindow(keep: Set<ChunkCoord>) {
+        val activeEngine = engine ?: return
+        viewModelScope.launch {
+            val currentChunks = activeEngine.state.value.chunks
+            val evicted = currentChunks.keys - keep
+            if (evicted.isNotEmpty()) {
+                repository.saveChunks(evicted.mapNotNull { currentChunks[it] })
+            }
+            val missing = keep - currentChunks.keys
+            val hydrated = if (missing.isEmpty()) emptyMap() else repository.getChunks(missing)
+            activeEngine.syncWindow(keep, hydrated)
+        }
     }
 
     fun flush() {
