@@ -95,6 +95,65 @@ fun BoardCanvas(
     }
 }
 
+/**
+ * Interactive viewport renderer used from T7 onward.
+ *
+ * Only chunks intersecting the viewport plus the one-chunk render margin are passed through the
+ * draw loop. The original [BoardCanvas] overload remains as the fixed T6 visual fixture.
+ */
+@Composable
+fun ViewportBoardCanvas(
+    chunks: Collection<Chunk>,
+    viewportState: ViewportState,
+    modifier: Modifier = Modifier,
+) {
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer(cacheSize = 8)
+    val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
+    val cellSize = (BoardDimens.BaseCellSizeDp * viewportState.zoom.toFloat()).dp
+    val cellSizePx = with(density) { cellSize.toPx() }
+    val gridStrokePx = with(density) { BoardDimens.CellGridStrokeDp.dp.toPx() }
+    val visibleBounds = viewportState.visibleChunkBounds(baseCellSizePx)
+    val visibleChunks = remember(chunks, visibleBounds) {
+        if (visibleBounds == null) {
+            emptyList()
+        } else {
+            chunks.filter { it.coord in visibleBounds }
+        }
+    }
+    val numberLayouts = rememberNumberLayouts(
+        textMeasurer = textMeasurer,
+        cellSize = cellSize,
+    )
+    val cellDrawer = remember(cellSizePx, gridStrokePx, numberLayouts) {
+        CellDrawer(
+            cellSizePx = cellSizePx,
+            gridStrokePx = gridStrokePx,
+            numberLayouts = numberLayouts,
+        )
+    }
+
+    Canvas(
+        modifier = modifier
+            .background(BoardPalette.Background)
+            .viewportGestures(viewportState),
+    ) {
+        val screenCenterX = size.width * 0.5f
+        val screenCenterY = size.height * 0.5f
+        for (chunkIndex in visibleChunks.indices) {
+            drawViewportChunk(
+                chunk = visibleChunks[chunkIndex],
+                viewportCenterX = viewportState.centerX,
+                viewportCenterY = viewportState.centerY,
+                screenCenterX = screenCenterX,
+                screenCenterY = screenCenterY,
+                cellSizePx = cellSizePx,
+                cellDrawer = cellDrawer,
+            )
+        }
+    }
+}
+
 @Composable
 private fun rememberNumberLayouts(
     textMeasurer: TextMeasurer,
@@ -113,6 +172,43 @@ private fun rememberNumberLayouts(
                     style = digitStyle,
                 )
             }
+        }
+    }
+}
+
+private fun DrawScope.drawViewportChunk(
+    chunk: Chunk,
+    viewportCenterX: Double,
+    viewportCenterY: Double,
+    screenCenterX: Float,
+    screenCenterY: Float,
+    cellSizePx: Float,
+    cellDrawer: CellDrawer,
+) {
+    val worldLeft = chunk.coord.cx.toDouble() * CHUNK_SIDE_LENGTH
+    val worldTop = chunk.coord.cy.toDouble() * CHUNK_SIDE_LENGTH
+    val chunkLeft = screenCenterX + ((worldLeft - viewportCenterX) * cellSizePx).toFloat()
+    val chunkTop = screenCenterY + ((worldTop - viewportCenterY) * cellSizePx).toFloat()
+
+    for (index in 0 until CELLS_PER_CHUNK) {
+        val localX = index % CHUNK_SIDE_LENGTH
+        val localY = index / CHUNK_SIDE_LENGTH
+        with(cellDrawer) {
+            drawCell(
+                cell = chunk.cells[index],
+                left = chunkLeft + localX * cellSizePx,
+                top = chunkTop + localY * cellSizePx,
+            )
+        }
+    }
+
+    if (chunk.status == ChunkStatus.LOCKED) {
+        with(cellDrawer) {
+            drawLockedOverlay(
+                left = chunkLeft,
+                top = chunkTop,
+                sizePx = CHUNK_SIDE_LENGTH * cellSizePx,
+            )
         }
     }
 }

@@ -10,7 +10,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -47,11 +46,6 @@ class RoomChunkRepository(
     /** Counts durable meta upserts; useful for debounce coalescing tests. */
     @Volatile
     var metaWriteCount: Int = 0
-        private set
-
-    /** Last unexpected debounce failure, if any (tests assert this stays null). */
-    @Volatile
-    var lastDebounceError: Throwable? = null
         private set
 
     override suspend fun getChunk(coord: ChunkCoord): Chunk? {
@@ -138,20 +132,13 @@ class RoomChunkRepository(
     }
 
     private fun scheduleDebouncedFlush() {
-        debounceJob.getAndSet(
+        val previous = debounceJob.getAndSet(
             scope.launch {
-                try {
-                    delayMillis(debounceMs)
-                    ensureActive()
-                    persistPending()
-                } catch (cancelled: kotlinx.coroutines.CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    lastDebounceError = error
-                    throw error
-                }
+                delayMillis(debounceMs)
+                persistPending()
             },
-        )?.cancel()
+        )
+        previous?.cancel()
     }
 
     private suspend fun persistPending() {
@@ -166,6 +153,7 @@ class RoomChunkRepository(
                 metaSnapshot = pendingMeta
             }
 
+            // Survive debounce-job cancellation once a flush has begun (e.g. flush() joins us).
             withContext(NonCancellable) {
                 withContext(ioDispatcher) {
                     if (chunksSnapshot.isNotEmpty()) {
