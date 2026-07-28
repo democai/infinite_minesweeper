@@ -3,6 +3,7 @@ package com.infinite.minesweeper.data.db
 import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkRepository
+import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameMeta
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineDispatcher
@@ -90,6 +91,20 @@ class RoomChunkRepository(
         return result
     }
 
+    override suspend fun getLockedChunks(): Map<ChunkCoord, Chunk> {
+        val fromPending = queueMutex.withLock {
+            pendingChunks.values.filter { it.status == ChunkStatus.LOCKED }.associateBy { it.coord }
+        }
+        val fromDb = withContext(ioDispatcher) {
+            chunkDao.getChunksByStatus(ChunkStatus.LOCKED)
+                .asSequence()
+                .map(ChunkMapper::toDomain)
+                .filter { it.coord !in fromPending }
+                .associateBy { it.coord }
+        }
+        return fromPending + fromDb
+    }
+
     override suspend fun saveChunk(chunk: Chunk) {
         queueMutex.withLock {
             pendingChunks[chunk.coord] = chunk
@@ -129,6 +144,23 @@ class RoomChunkRepository(
             job.join()
         }
         persistPending()
+    }
+
+    override suspend fun clearAll() {
+        debounceJob.getAndSet(null)?.cancel()
+        // persistMutex guarantees this runs after any persistPending() already past its
+        // NonCancellable write section — a bare debounceJob.cancel() can't stop that, so without
+        // this a stale write could land after the delete and silently undo the reset.
+        persistMutex.withLock {
+            queueMutex.withLock {
+                pendingChunks.clear()
+                pendingMeta = null
+            }
+            withContext(ioDispatcher) {
+                chunkDao.deleteAll()
+                gameMetaDao.deleteAll()
+            }
+        }
     }
 
     private fun scheduleDebouncedFlush() {

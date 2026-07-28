@@ -70,16 +70,21 @@ Unchanged from v1 in substance, restated for completeness:
 
 - Reveal-time generation, first-touch-safe: a chunk's mines are rolled the first time a reveal touches it, excluding the tapped cell and its 8 neighbors.
 - Lazy-neighbor generation: generating chunk `(cx, cy)` also rolls (without revealing) its 8 neighbors so adjacency counts are correct immediately. No deferred-adjacency bookkeeping.
-- Density is a pure function of chunk coordinates, distance-scaled from the origin:
+- Density is a pure function of chunk coordinates: an independent hash of `(worldSeed, cx, cy)`
+  mapped uniformly into `[0.156, 0.35]` so nearby selectors mix easy and hard. Base 15.6% matches
+  classic intermediate (40 mines on 16×16); the 35% cap keeps the hardest selectors solvable. The
+  curve is one function, swappable later without touching storage or generation order.
 
 ```kotlin
-fun mineDensityFor(cx: Int, cy: Int): Float {
-    val d = maxOf(abs(cx), abs(cy))          // Chebyshev distance in chunks
-    return (0.156f + d * 0.01f).coerceAtMost(0.35f)
+fun mineDensityFor(seed: Long, cx: Int, cy: Int): Float {
+    val u = unitInterval(chunkSeed(seed, cx, cy, DENSITY_SALT)) // in [0, 1)
+    return 0.156f + u.toFloat() * (0.35f - 0.156f)
 }
 ```
 
-Base 15.6% matches classic intermediate (40 mines on 16×16); the 35% cap keeps far-out chunks solvable. The curve is one function, swappable later for rings or noise pockets without touching storage or generation order.
+Before revealing cells in a chunk, its full 8-neighbor ring must already be generated
+(`ensureNeighborsGenerated`) so border numbers are final — missing neighbors must not count as
+zero mines and then jump when the frontier expands.
 
 ### Flood-fill bounds (new in v2)
 

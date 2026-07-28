@@ -100,6 +100,7 @@ class RoomChunkRepositoryTest {
             viewportX = -76.5f,
             viewportY = 59f,
             zoom = 1.25f,
+            hasEverRevealed = true,
         )
 
         repository.saveGameMeta(meta)
@@ -194,6 +195,29 @@ class RoomChunkRepositoryTest {
     @Test
     fun getChunk_returnsNullWhenMissing() = runTest {
         assertNull(newRepository().getChunk(ChunkCoord(99, 99)))
+    }
+
+    @Test
+    fun clearAll_removesAllChunksAndMetaAndDropsQueuedWrites() = runTest {
+        val repository = newRepository()
+        val chunk = sampleChunk(ChunkCoord(4, 4), generated = true)
+        repository.saveChunk(chunk)
+        repository.saveGameMeta(GameMeta(flagsPlaced = 3, hasEverRevealed = true))
+        repository.flush()
+        assertEquals(chunk, repository.getChunk(chunk.coord))
+
+        // A fresh write queued right before the reset must not survive it either.
+        repository.saveChunk(sampleChunk(ChunkCoord(5, 5), generated = true))
+        repository.clearAll()
+
+        assertNull(repository.getChunk(chunk.coord))
+        assertNull(repository.getChunk(ChunkCoord(5, 5)))
+        assertNull(repository.getGameMeta())
+
+        // No stray debounced write from before the reset should reappear once its timer fires.
+        advanceTimeBy(RoomChunkRepository.DEFAULT_DEBOUNCE_MS)
+        advanceUntilIdle()
+        assertNull(repository.getChunk(ChunkCoord(5, 5)))
     }
 
     @Test

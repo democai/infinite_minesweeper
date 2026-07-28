@@ -2,16 +2,21 @@ package com.infinite.minesweeper.ui.board
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -28,12 +33,14 @@ import com.infinite.minesweeper.core.model.CellState
 import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkStatus
+import com.infinite.minesweeper.ui.settings.LongPressDuration
 import com.infinite.minesweeper.ui.theme.BoardDimens
 import com.infinite.minesweeper.ui.theme.BoardPalette
 import com.infinite.minesweeper.ui.theme.CellDigitSizeFraction
 import com.infinite.minesweeper.ui.theme.InfiniteMinesweeperTheme
-import kotlin.math.min
 import kotlin.math.floor
+import kotlin.math.min
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * T6 visual fixture. It intentionally has no gestures or viewport state.
@@ -115,6 +122,7 @@ fun ViewportBoardCanvas(
     modifier: Modifier = Modifier,
     onTap: (CellCoord) -> Unit = {},
     onLongPress: (CellCoord) -> Unit = {},
+    longPressTimeoutMs: Long = LongPressDuration.Default.timeoutMs,
     effect: BoardEffect? = null,
 ) {
     val density = LocalDensity.current
@@ -123,6 +131,7 @@ fun ViewportBoardCanvas(
     val cellSize = (BoardDimens.BaseCellSizeDp * viewportState.zoom.toFloat()).dp
     val cellSizePx = with(density) { cellSize.toPx() }
     val gridStrokePx = with(density) { BoardDimens.CellGridStrokeDp.dp.toPx() }
+    val chunkOutlineStrokePx = with(density) { BoardDimens.ChunkOutlineStrokeDp.dp.toPx() }
     val visibleBounds = viewportState.visibleChunkBounds(baseCellSizePx)
     val visibleChunks = remember(chunks, visibleBounds) {
         if (visibleBounds == null) {
@@ -145,7 +154,8 @@ fun ViewportBoardCanvas(
     val lodBitmaps = remember { mutableMapOf<ChunkCoord, Pair<Chunk, ImageBitmap>>() }
     val visibleCoordinates = visibleChunks.mapTo(hashSetOf()) { it.coord }
     lodBitmaps.keys.retainAll(visibleCoordinates)
-    if (LodRenderer.shouldUseLod(cellSize.value)) {
+    val useLod = LodRenderer.shouldUseLod(cellSize.value)
+    if (useLod) {
         visibleChunks.forEach { chunk ->
             if (lodBitmaps[chunk.coord]?.first != chunk) {
                 lodBitmaps[chunk.coord] = chunk to LodRenderer.bakeImageBitmap(chunk)
@@ -156,7 +166,13 @@ fun ViewportBoardCanvas(
     Canvas(
         modifier = modifier
             .background(BoardPalette.Background)
-            .boardInputGestures(viewportState, onTap, onLongPress)
+            .boardInputGestures(
+                viewportState = viewportState,
+                longPressTimeoutMs = longPressTimeoutMs,
+                inputEnabled = !useLod,
+                onTap = onTap,
+                onLongPress = onLongPress,
+            )
             .viewportGestures(viewportState),
     ) {
         val screenCenterX = size.width * 0.5f
@@ -167,14 +183,15 @@ fun ViewportBoardCanvas(
                 ((chunk.coord.cx.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerX) * cellSizePx).toFloat()
             val chunkTop = screenCenterY +
                 ((chunk.coord.cy.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerY) * cellSizePx).toFloat()
-            if (LodRenderer.shouldUseLod(cellSize.value)) {
+            val chunkSizePx = CHUNK_SIDE_LENGTH * cellSizePx
+            if (useLod) {
                 lodBitmaps[chunk.coord]?.second?.let { bitmap ->
                     with(LodRenderer) {
                         drawLodChunk(
                             bitmap = bitmap,
                             left = chunkLeft,
                             top = chunkTop,
-                            sizePx = CHUNK_SIDE_LENGTH * cellSizePx,
+                            sizePx = chunkSizePx,
                         )
                     }
                 }
@@ -188,18 +205,39 @@ fun ViewportBoardCanvas(
                     cellSizePx = cellSizePx,
                     cellDrawer = cellDrawer,
                 )
+                // Solved blue tint is full-detail only (not the zoomed-out map).
+                if (LodRenderer.isCompletedChunk(chunk)) {
+                    drawRect(
+                        color = BoardPalette.SolvedHighlight,
+                        topLeft = Offset(chunkLeft, chunkTop),
+                        size = Size(chunkSizePx, chunkSizePx),
+                    )
+                }
             }
             if (effect?.chunk == chunk.coord && effect.alpha > 0f) {
                 drawRect(
                     color = effect.color,
                     topLeft = Offset(chunkLeft, chunkTop),
-                    size = androidx.compose.ui.geometry.Size(
-                        CHUNK_SIDE_LENGTH * cellSizePx,
-                        CHUNK_SIDE_LENGTH * cellSizePx,
-                    ),
+                    size = Size(chunkSizePx, chunkSizePx),
                     alpha = effect.alpha,
                 )
             }
+            drawChunkOutline(
+                left = chunkLeft,
+                top = chunkTop,
+                sizePx = chunkSizePx,
+                strokePx = chunkOutlineStrokePx,
+            )
+        }
+        if (useLod) {
+            val markerSizePx = with(density) { BoardDimens.HomeMarkerSizeDp.dp.toPx() }
+            // Center of Home selector (chunk 0,0), not the top-left cell at world origin.
+            val homeCenterWorld = CHUNK_SIDE_LENGTH / 2.0
+            val markerCenterX =
+                screenCenterX + ((homeCenterWorld - viewportState.centerX) * cellSizePx).toFloat()
+            val markerCenterY =
+                screenCenterY + ((homeCenterWorld - viewportState.centerY) * cellSizePx).toFloat()
+            drawHomeMarker(centerX = markerCenterX, centerY = markerCenterY, sizePx = markerSizePx)
         }
     }
 }
@@ -210,11 +248,21 @@ data class BoardEffect(
     val alpha: Float,
 )
 
+/**
+ * Installs tap/long-press detection that's distinct from a drag or pinch: a pointer that moves
+ * past touch slop, or a second pointer joining mid-gesture, cancels the pending tap/long-press
+ * entirely so [ViewportState]'s sibling `.viewportGestures` pan/pinch handling owns the gesture
+ * instead (plan: "no marking/revealing while zooming or moving"). [inputEnabled] additionally
+ * suppresses dispatch outright while the board is in LOD/overview mode, where a tap is too
+ * imprecise to safely reveal or flag a cell.
+ */
 private fun Modifier.boardInputGestures(
     viewportState: ViewportState,
+    longPressTimeoutMs: Long,
+    inputEnabled: Boolean,
     onTap: (CellCoord) -> Unit,
     onLongPress: (CellCoord) -> Unit,
-): Modifier = pointerInput(viewportState, onTap, onLongPress) {
+): Modifier = pointerInput(viewportState, longPressTimeoutMs, inputEnabled, onTap, onLongPress) {
     fun Offset.toCell(): CellCoord {
         val pixelsPerCell = BoardDimens.BaseCellSizeDp.dp.toPx() * viewportState.zoom
         val worldX = viewportState.centerX + (x - size.width / 2.0) / pixelsPerCell
@@ -224,11 +272,45 @@ private fun Modifier.boardInputGestures(
             y = floor(worldY).toLong().coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt(),
         )
     }
-    detectTapGestures(
-        onTap = { onTap(it.toCell()) },
-        onLongPress = { onLongPress(it.toCell()) },
-    )
+    val slop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        // awaitEachGesture's block already runs with an AwaitPointerEventScope receiver, so
+        // awaitPointerEvent() below is called directly — no nested awaitPointerEventScope.
+        val down = awaitFirstDown()
+        var cancelled = false
+        val resolvedBeforeTimeout = withTimeoutOrNull(longPressTimeoutMs) {
+            while (true) {
+                val event = awaitPointerEvent()
+                if (event.changes.size > 1) {
+                    cancelled = true
+                    return@withTimeoutOrNull
+                }
+                val change = event.changes.firstOrNull { it.id == down.id }
+                    ?: return@withTimeoutOrNull
+                if (exceedsTouchSlop(down.position, change.position, slop)) {
+                    cancelled = true
+                    return@withTimeoutOrNull
+                }
+                if (!change.pressed) return@withTimeoutOrNull
+            }
+        } != null
+        when {
+            // Slop exceeded or a second pointer joined: this is a drag/pinch, not a tap — let
+            // .viewportGestures handle it, don't dispatch anything.
+            cancelled -> Unit
+            resolvedBeforeTimeout -> if (inputEnabled) onTap(down.position.toCell())
+            else -> {
+                // Timed out while still down, within slop, single pointer → long-press.
+                if (inputEnabled) onLongPress(down.position.toCell())
+                waitForUpOrCancellation()
+            }
+        }
+    }
 }
+
+/** True when [current] has moved far enough from [start] to no longer count as a tap. */
+internal fun exceedsTouchSlop(start: Offset, current: Offset, slopPx: Float): Boolean =
+    (current - start).getDistance() > slopPx
 
 @Composable
 private fun rememberNumberLayouts(
@@ -323,6 +405,63 @@ private fun DrawScope.drawChunk(
             )
         }
     }
+    drawChunkOutline(
+        left = chunkLeft,
+        top = chunkTop,
+        sizePx = CHUNK_SIDE_LENGTH * cellSizePx,
+        strokePx = cellDrawer.gridStrokeWidthPx,
+    )
+}
+
+/**
+ * Small decorative house glyph centered in the Home selector (chunk 0,0), visible only in
+ * overview/LOD mode as a landmark for orienting a large explored world. Purely visual: overview
+ * mode has no tap dispatch at all (see [boardInputGestures]'s `inputEnabled`), so this never
+ * needs hit-testing.
+ */
+private fun DrawScope.drawHomeMarker(centerX: Float, centerY: Float, sizePx: Float) {
+    val half = sizePx * 0.5f
+    val roofPeakY = centerY - half
+    val eaveY = centerY - half * 0.15f
+    val bodyBottom = centerY + half
+    val left = centerX - half
+    val right = centerX + half
+
+    val roof = Path().apply {
+        moveTo(centerX, roofPeakY)
+        lineTo(right, eaveY)
+        lineTo(left, eaveY)
+        close()
+    }
+    drawPath(path = roof, color = BoardPalette.AccentGold)
+    drawRect(
+        color = BoardPalette.AccentGold,
+        topLeft = Offset(left + half * 0.15f, eaveY),
+        size = Size((right - left) - sizePx * 0.3f, bodyBottom - eaveY),
+    )
+    val doorWidth = sizePx * 0.22f
+    val doorHeight = (bodyBottom - eaveY) * 0.55f
+    drawRect(
+        color = BoardPalette.Background,
+        topLeft = Offset(centerX - doorWidth * 0.5f, bodyBottom - doorHeight),
+        size = Size(doorWidth, doorHeight),
+    )
+}
+
+/** Faint gold frame around an 8×8 selector so chunk boundaries stay readable while zoomed in. */
+private fun DrawScope.drawChunkOutline(
+    left: Float,
+    top: Float,
+    sizePx: Float,
+    strokePx: Float,
+) {
+    val inset = strokePx * 0.5f
+    drawRect(
+        color = BoardPalette.ChunkOutline,
+        topLeft = Offset(left + inset, top + inset),
+        size = Size(sizePx - strokePx, sizePx - strokePx),
+        style = Stroke(width = strokePx),
+    )
 }
 
 private fun fittedCellSize(

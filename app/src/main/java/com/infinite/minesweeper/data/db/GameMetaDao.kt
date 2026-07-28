@@ -11,4 +11,7 @@ interface GameMetaDao {
 
     @Upsert
     suspend fun upsert(meta: GameMetaEntity)
+
+    @Query("DELETE FROM game_meta")
+    suspend fun deleteAll()
 }

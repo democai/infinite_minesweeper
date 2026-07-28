@@ -10,6 +10,13 @@ data class GameMeta(
     val viewportX: Float = 0f,
     val viewportY: Float = 0f,
     val zoom: Float = 1f,
+    /**
+     * True once any cell anywhere has ever been revealed. Durable (not derived from the
+     * viewport-bounded [GameState.chunks] window) so a cold jump to unexplored territory can't
+     * be confused with a brand-new board just because prior progress has been evicted from the
+     * live window. Gates the one-time adjacency-rule bootstrap exemption in `DefaultGameEngine`.
+     */
+    val hasEverRevealed: Boolean = false,
 ) {
     init {
         require(flagsPlaced >= 0) { "flagsPlaced cannot be negative" }

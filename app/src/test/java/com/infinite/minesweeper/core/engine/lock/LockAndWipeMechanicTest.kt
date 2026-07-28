@@ -53,7 +53,9 @@ class LockAndWipeMechanicTest {
     }
 
     @Test
-    fun lockedNeighborNeverCountsAsCleared() = runTest {
+    fun lockedPeerDoesNotBlockSoftResolveWhenRemainingNeighborsAreCleared() = runTest {
+        // Adjacent locks used to deadlock each other. Peer locks are skipped so a pocket enclosed
+        // by solved selectors can unlock (the screenshot cluster).
         val center = ChunkCoord(0, 0)
         val east = ChunkCoord(1, 0)
         val chunks = completedNeighborhood(center).toMutableMap()
@@ -65,9 +67,24 @@ class LockAndWipeMechanicTest {
             GameState(chunks = recomputeAdjacency(chunks)),
         )
 
-        assertEquals(ChunkStatus.LOCKED, result.state.chunks.getValue(center).status)
-        assertEquals(ChunkStatus.LOCKED, result.state.chunks.getValue(east).status)
-        assertTrue(result.events.isEmpty())
+        assertEquals(ChunkStatus.NORMAL, result.state.chunks.getValue(center).status)
+        assertTrue(result.events.any { it == GameEvent.ChunkSoftResolved(center) })
+    }
+
+    @Test
+    fun firstLockIntoAlreadyClearedRingSoftResolvesImmediately() = runTest {
+        val center = ChunkCoord(0, 0)
+        val chunks = completedNeighborhood(center).toMutableMap()
+        chunks[center] = lockedChunk(center, CellCoord(3, 3))
+
+        val result = mechanic().process(
+            GameEvent.ChunkLocked(center, CellCoord(3, 3)),
+            GameState(chunks = recomputeAdjacency(chunks)),
+        )
+
+        assertEquals(ChunkStatus.NORMAL, result.state.chunks.getValue(center).status)
+        assertTrue(result.state.chunks.getValue(center).everSurrounded)
+        assertEquals(listOf(GameEvent.ChunkSoftResolved(center)), result.events)
     }
 
     @Test
@@ -106,6 +123,49 @@ class LockAndWipeMechanicTest {
                 GameEvent.ChunkSoftResolved(westLock),
                 GameEvent.ChunkSoftResolved(eastLock),
             ),
+            result.events,
+        )
+    }
+
+    @Test
+    fun softResolveThatCompletesAChunkAutoFlagsAndEmitsChunkCleared() = runTest {
+        // All non-mines already revealed; only the exploded mine and hidden mines remain. Soft
+        // resolve turns the exploded cell into the last revealed non-mine (§5.3) and must then
+        // auto-flag (§6) so the selector counts as cleared for the §5.5 watcher.
+        val center = ChunkCoord(0, 0)
+        val east = ChunkCoord(1, 0)
+        val chunks = completedNeighborhood(center).toMutableMap()
+        val cells = List(64) { index ->
+            when (index) {
+                0 -> Cell(state = CellState.EXPLODED, isMine = true)
+                1, 2 -> Cell(state = CellState.HIDDEN, isMine = true)
+                else -> Cell(state = CellState.REVEALED)
+            }
+        }
+        chunks[center] = Chunk(
+            coord = center,
+            generated = true,
+            cells = cells,
+            status = ChunkStatus.LOCKED,
+            lockedAt = 1L,
+        )
+
+        val result = mechanic().process(
+            GameEvent.ChunkCleared(east),
+            GameState(chunks = recomputeAdjacency(chunks), meta = GameMeta(selectorsCleared = 8)),
+        )
+
+        val resolved = result.state.chunks.getValue(center)
+        assertEquals(ChunkStatus.NORMAL, resolved.status)
+        assertTrue(resolved.everSurrounded)
+        assertEquals(CellState.REVEALED, resolved.cells[0].state)
+        assertFalse(resolved.cells[0].isMine)
+        assertEquals(CellState.FLAGGED, resolved.cells[1].state)
+        assertEquals(CellState.FLAGGED, resolved.cells[2].state)
+        assertEquals(2, result.state.meta.flagsPlaced)
+        assertEquals(9, result.state.meta.selectorsCleared)
+        assertEquals(
+            listOf(GameEvent.ChunkSoftResolved(center), GameEvent.ChunkCleared(center)),
             result.events,
         )
     }
@@ -204,6 +264,11 @@ class LockAndWipeMechanicTest {
 
         override suspend fun generateForFirstTouch(
             firstTouch: CellCoord,
+            knownChunks: Map<ChunkCoord, Chunk>,
+        ): GenerationResult = GenerationResult(emptyMap())
+
+        override suspend fun ensureNeighborsGenerated(
+            center: ChunkCoord,
             knownChunks: Map<ChunkCoord, Chunk>,
         ): GenerationResult = GenerationResult(emptyMap())
 

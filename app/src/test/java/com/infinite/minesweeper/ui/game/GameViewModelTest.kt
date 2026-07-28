@@ -1,21 +1,25 @@
 package com.infinite.minesweeper.ui.game
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.lifecycle.viewModelScope
 import com.infinite.minesweeper.core.model.Cell
 import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
 import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
+import com.infinite.minesweeper.core.model.ChunkStatus
+import com.infinite.minesweeper.core.model.GameMeta
+import com.infinite.minesweeper.core.model.GameState
 import com.infinite.minesweeper.data.persistence.InMemoryChunkRepository
 import com.infinite.minesweeper.ui.settings.InputBindingPreferences
 import com.infinite.minesweeper.ui.settings.TapKind
-import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
@@ -41,7 +45,11 @@ class GameViewModelTest {
 
     @After
     fun tearDown() {
+        // resetMain() uninstalls the test Main and leaves JVM Android unit tests with no
+        // Looper-backed dispatcher. Reinstall an Unconfined stand-in so a later test in the same
+        // process that touches Dispatchers.Main (directly or via runTest) does not crash.
         Dispatchers.resetMain()
+        Dispatchers.setMain(UnconfinedTestDispatcher())
     }
 
     @Test
@@ -92,6 +100,84 @@ class GameViewModelTest {
         // cancellation must finish resolving on this test's own Main dispatcher before tearDown
         // resets Main — otherwise a coroutine woken up after resetMain() finds no Main dispatcher
         // and fails, surfacing as a flaky failure in a *different*, unrelated test.
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun syncVisibleWindowPinsLockedChunksSoHudAndWatcherKeepThem() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+
+        val repository = InMemoryChunkRepository()
+        val lockedCoord = ChunkCoord(40, 40)
+        val lockedChunk = Chunk(
+            coord = lockedCoord,
+            generated = true,
+            cells = List(64) { index ->
+                if (index == 0) {
+                    Cell(state = CellState.EXPLODED, isMine = true)
+                } else {
+                    Cell()
+                }
+            },
+            status = ChunkStatus.LOCKED,
+            lockedAt = 1L,
+        )
+        repository.saveChunk(lockedChunk)
+
+        val viewModel = GameViewModel(repository, inputBindingPreferences())
+        advanceUntilIdle()
+
+        viewModel.syncVisibleWindow(setOf(lockedCoord))
+        advanceUntilIdle()
+        assertEquals(1, viewModel.state.value.selectorsLocked)
+
+        viewModel.syncVisibleWindow(setOf(ChunkCoord(0, 0)))
+        advanceUntilIdle()
+
+        assertTrue(
+            "locked selectors must stay hydrated outside the viewport window",
+            viewModel.state.value.chunks.containsKey(lockedCoord),
+        )
+        assertEquals(1, viewModel.state.value.selectorsLocked)
+        assertEquals(ChunkStatus.LOCKED, viewModel.state.value.chunks.getValue(lockedCoord).status)
+
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun resetGame_wipesRepositoryAndReturnsToAFreshOriginState() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+
+        val store = InMemoryChunkRepository.DurableStore()
+        val repository = InMemoryChunkRepository(store)
+        // Within restoreGameState's default 2-chunk restore window around the default (0,0)
+        // viewport, so it's actually loaded into the live state on startup.
+        val seededCoord = ChunkCoord(1, 1)
+        val seededChunk = Chunk(
+            coord = seededCoord,
+            generated = true,
+            cells = List(64) { index -> if (index == 0) Cell(state = CellState.REVEALED) else Cell() },
+        )
+        repository.saveChunk(seededChunk)
+        repository.saveGameMeta(GameMeta(flagsPlaced = 5, hasEverRevealed = true))
+
+        val viewModel = GameViewModel(repository, inputBindingPreferences())
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.chunks.containsKey(seededCoord))
+
+        viewModel.resetGame()
+        advanceUntilIdle()
+
+        assertEquals(GameState(), viewModel.state.value)
+        assertTrue("clearAll must wipe every durable chunk", store.chunks.isEmpty())
+        // The new session's persistence coordinator writes back a fresh default GameMeta on its
+        // first tick — the durable state must reflect a wiped board, not merely be null.
+        assertEquals(GameMeta(), store.meta)
+
         viewModel.viewModelScope.cancel()
         advanceUntilIdle()
     }

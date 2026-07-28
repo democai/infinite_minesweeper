@@ -6,6 +6,7 @@ import com.infinite.minesweeper.core.coords.cellToChunk
 import com.infinite.minesweeper.core.coords.cellToLocalIndex
 import com.infinite.minesweeper.core.engine.DefaultGameEngine
 import com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic
+import com.infinite.minesweeper.core.engine.lock.neighboringChunkCoords
 import com.infinite.minesweeper.core.generation.SeededMineGenerator
 import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
@@ -23,6 +24,11 @@ import com.infinite.minesweeper.ui.settings.InputBindingPreferences
 import com.infinite.minesweeper.ui.settings.TapKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -31,6 +37,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 private const val WORLD_SEED = 0x49_4E_46_4D_49_4E_45L
 
@@ -49,6 +58,11 @@ class GameViewModel @Inject constructor(
     private var engine: DefaultGameEngine? = null
     private var persistence: GamePersistenceCoordinator? = null
     private var binding: InputBinding = InputBinding.Default
+    private val flushMutex = Mutex()
+
+    /** Tracks the current session's engine-state/events collectors and persistence coordinator,
+     * so [resetGame] can stop exactly those (and only those) before wiping durable storage. */
+    private var sessionJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -56,31 +70,55 @@ class GameViewModel @Inject constructor(
             launch {
                 inputBindingPreferences.binding.collect { binding = it }
             }
+            startSession(fresh = false)
+        }
+    }
 
-            val restored = restoreGameState(repository)
-            viewport.value = ViewportSnapshot(
-                centerX = restored.meta.viewportX,
-                centerY = restored.meta.viewportY,
-                zoom = restored.meta.zoom,
-            )
-            val generator = SeededMineGenerator(WORLD_SEED)
-            val createdEngine = DefaultGameEngine(
-                mineGenerator = generator,
-                initialState = restored,
-                lockAndWipeMechanic = LockAndWipeMechanic(generator),
-            )
-            engine = createdEngine
-            _state.value = restored
+    private suspend fun startSession(fresh: Boolean) {
+        val generator = SeededMineGenerator(WORLD_SEED)
+        val restored = if (fresh) GameState() else restoreGameState(repository, generator)
+        viewport.value = ViewportSnapshot(
+            centerX = restored.meta.viewportX,
+            centerY = restored.meta.viewportY,
+            zoom = restored.meta.zoom,
+        )
+        val createdEngine = DefaultGameEngine(
+            mineGenerator = generator,
+            initialState = restored,
+            lockAndWipeMechanic = LockAndWipeMechanic(generator),
+            loadChunks = { coords -> repository.getChunks(coords) },
+        )
+        engine = createdEngine
+        _state.value = restored
 
-            launch {
-                createdEngine.state.collect { _state.value = it }
-            }
-            launch {
-                createdEngine.events.collect { _events.emit(it) }
-            }
+        val job = SupervisorJob(viewModelScope.coroutineContext[Job])
+        sessionJob = job
+        val sessionScope = CoroutineScope(viewModelScope.coroutineContext + job)
+        sessionScope.launch {
+            createdEngine.state.collect { _state.value = it }
+        }
+        sessionScope.launch {
+            createdEngine.events.collect { _events.emit(it) }
+        }
+        persistence = GamePersistenceCoordinator(_state, viewport, repository).also {
+            sessionScope.launch { it.run() }
+        }
+    }
 
-            persistence = GamePersistenceCoordinator(_state, viewport, repository).also {
-                launch { it.run() }
+    /**
+     * Wipes all board/world progress and starts a brand-new game. Stops the current session's
+     * collectors first (and waits for them to fully stop) so a write already in flight from the
+     * old [GamePersistenceCoordinator] can't land after [ChunkRepository.clearAll] and silently
+     * undo the reset.
+     */
+    fun resetGame() {
+        viewModelScope.launch {
+            flushMutex.withLock {
+                sessionJob?.cancelAndJoin()
+                engine = null
+                persistence = null
+                withContext(NonCancellable) { repository.clearAll() }
+                startSession(fresh = true)
             }
         }
     }
@@ -99,10 +137,9 @@ class GameViewModel @Inject constructor(
         val action = InputActionMapper.map(gesture, cell, cellState, binding) ?: return
         val activeEngine = engine ?: return
         viewModelScope.launch {
-            // The tapped chunk may have been evicted by syncVisibleWindow (e.g. a fast pan
-            // followed immediately by a tap, before the viewport-driven rehydration lands).
-            // Rehydrate it from storage first so the engine never mistakes an evicted,
-            // already-generated chunk for a brand-new one and re-rolls its layout.
+            // Cascade/chord hydrate via the engine's loadChunks hook. This tap-path rehydrate is
+            // still useful so InputActionMapper and the LOCKED guard see the latest cell before
+            // dispatch when a fast pan-then-tap races the viewport sync.
             if (chunk == null && activeEngine.state.value.chunks[coord] == null) {
                 repository.getChunk(coord)?.let { persisted ->
                     activeEngine.syncWindow(
@@ -126,37 +163,66 @@ class GameViewModel @Inject constructor(
     /**
      * Bounds the engine's live chunk map to [keep] as the viewport pans, so a long session
      * exploring outward does not keep every chunk it has ever touched resident in memory (plan
-     * §9, dev tree T7/T13). Evicted chunks are saved through the repository's write-behind queue
-     * before being dropped so [dispatch]'s rehydrate-on-tap fallback and a later re-visit both see
-     * their latest state, independent of [GamePersistenceCoordinator]'s own diff timing.
+     * §9, dev tree T7/T13). Locked selectors and their 8-neighbor rings stay hydrated so the
+     * surround watcher can soft-resolve without the solved ring having been evicted out from
+     * under it. Persisted locks outside the live map are pulled in for the same reason.
      */
     fun syncVisibleWindow(keep: Set<ChunkCoord>) {
         val activeEngine = engine ?: return
         viewModelScope.launch {
             val currentChunks = activeEngine.state.value.chunks
-            val evicted = currentChunks.keys - keep
+            val persistedLocks = repository.getLockedChunks()
+            val locked = currentChunks.filterValues { it.status == ChunkStatus.LOCKED }.keys +
+                persistedLocks.keys
+            val lockHalo = buildSet {
+                for (coord in locked) {
+                    add(coord)
+                    addAll(neighboringChunkCoords(coord))
+                }
+            }
+            val effectiveKeep = keep + lockHalo
+            val evicted = currentChunks.keys - effectiveKeep
             if (evicted.isNotEmpty()) {
                 repository.saveChunks(evicted.mapNotNull { currentChunks[it] })
             }
-            val missing = keep - currentChunks.keys
-            val hydrated = if (missing.isEmpty()) emptyMap() else repository.getChunks(missing)
-            activeEngine.syncWindow(keep, hydrated)
+            val missing = effectiveKeep - currentChunks.keys
+            val hydrated = buildMap {
+                putAll(persistedLocks.filterKeys { it in missing })
+                val stillMissing = missing - keys
+                if (stillMissing.isNotEmpty()) putAll(repository.getChunks(stillMissing))
+            }
+            activeEngine.syncWindow(effectiveKeep, hydrated)
         }
     }
 
+    /**
+     * Fire-and-forget flush for non-critical callers. Prefer [flushNow] from lifecycle `onStop`
+     * so the write-behind queue is drained before the process can be killed.
+     */
     fun flush() {
-        viewModelScope.launch {
-            val snapshot = _state.value
-            val viewportSnapshot = viewport.value
-            repository.saveChunks(snapshot.chunks.values)
-            repository.saveGameMeta(
-                snapshot.meta.copy(
-                    viewportX = viewportSnapshot.centerX,
-                    viewportY = viewportSnapshot.centerY,
-                    zoom = viewportSnapshot.zoom,
-                ),
-            )
-            repository.flush()
+        viewModelScope.launch { flushNow() }
+    }
+
+    /**
+     * Durably persists the live working set and viewport meta, then drains the repository queue.
+     * Safe to call from a blocking `onStop` observer: work runs under [NonCancellable] so a
+     * cancelling scope cannot drop the final write.
+     */
+    suspend fun flushNow() {
+        flushMutex.withLock {
+            withContext(NonCancellable) {
+                val snapshot = _state.value
+                val viewportSnapshot = viewport.value
+                repository.saveChunks(snapshot.chunks.values)
+                repository.saveGameMeta(
+                    snapshot.meta.copy(
+                        viewportX = viewportSnapshot.centerX,
+                        viewportY = viewportSnapshot.centerY,
+                        zoom = viewportSnapshot.zoom,
+                    ),
+                )
+                repository.flush()
+            }
         }
     }
 }

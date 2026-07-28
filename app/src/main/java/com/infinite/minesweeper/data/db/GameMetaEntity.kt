@@ -12,4 +12,5 @@ data class GameMetaEntity(
     val viewportX: Float,
     val viewportY: Float,
     val zoom: Float,
+    val hasEverRevealed: Boolean = false,
 )

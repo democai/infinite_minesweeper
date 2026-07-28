@@ -66,6 +66,11 @@ private class WipeFixtureGenerator : MineGenerator {
         knownChunks: Map<ChunkCoord, Chunk>,
     ): GenerationResult = GenerationResult(emptyMap())
 
+    override suspend fun ensureNeighborsGenerated(
+        center: ChunkCoord,
+        knownChunks: Map<ChunkCoord, Chunk>,
+    ): GenerationResult = GenerationResult(emptyMap())
+
     override suspend fun reroll(
         coord: ChunkCoord,
         knownChunks: Map<ChunkCoord, Chunk>,

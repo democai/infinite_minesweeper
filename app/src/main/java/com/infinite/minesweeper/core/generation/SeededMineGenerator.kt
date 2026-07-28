@@ -13,13 +13,12 @@ import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GenerationResult
 import com.infinite.minesweeper.core.model.MineGenerator
 import java.util.Random
-import kotlin.math.abs
 
 private const val BASE_DENSITY = 0.156f
-private const val DENSITY_PER_CHUNK = 0.01f
 private const val MAX_DENSITY = 0.35f
 private const val INITIAL_ROLL_SALT = 0x2A17C4E35B6D8091L
 private const val REROLL_SALT = 0x16D1B54A32D192EDL
+private const val DENSITY_SALT = 0xD15C0517A17C4E3L
 
 /**
  * A deterministic, per-chunk mine generator.
@@ -27,11 +26,18 @@ private const val REROLL_SALT = 0x16D1B54A32D192EDL
  * Each chunk receives its own random stream derived from [seed], its coordinate, and the kind of
  * roll. Generation order therefore does not consume shared random state; the only intentional
  * layout difference is removal of mines that fall inside a call's first-touch exclusion zone.
+ *
+ * Per-chunk mine density is an independent hash of `(seed, coord)` mapped uniformly into
+ * [[BASE_DENSITY], [MAX_DENSITY]], so nearby selectors mix easy and hard rather than ramping with
+ * distance from the origin.
  */
 class SeededMineGenerator(
     private val seed: Long,
 ) : MineGenerator {
-    override fun mineDensityFor(coord: ChunkCoord): Float = mineDensityForChunk(coord)
+    override fun mineDensityFor(coord: ChunkCoord): Float {
+        val u = unitInterval(chunkSeed(coord, DENSITY_SALT))
+        return BASE_DENSITY + u.toFloat() * (MAX_DENSITY - BASE_DENSITY)
+    }
 
     override suspend fun generateForFirstTouch(
         firstTouch: CellCoord,
@@ -60,6 +66,44 @@ class SeededMineGenerator(
             .filterTo(mutableSetOf()) { merged[it]?.generated == true }
         val withAdjacency = recomputeAdjacency(merged, adjacencyTargets)
 
+        val changed = adjacencyTargets
+            .filterTo(linkedSetOf()) { coord ->
+                coord in newlyGenerated || withAdjacency[coord] != knownChunks[coord]
+            }
+            .associateWith { coord -> requireNotNull(withAdjacency[coord]) }
+
+        return GenerationResult(changed)
+    }
+
+    override suspend fun ensureNeighborsGenerated(
+        center: ChunkCoord,
+        knownChunks: Map<ChunkCoord, Chunk>,
+    ): GenerationResult {
+        val merged = knownChunks.toMutableMap()
+        val newlyGenerated = mutableSetOf<ChunkCoord>()
+
+        for (coord in neighborhood(center)) {
+            if (coord == center) continue
+            val existing = merged[coord] ?: Chunk(coord = coord)
+            if (!existing.generated) {
+                merged[coord] = rollChunk(
+                    chunk = existing,
+                    excludedFromMines = emptySet(),
+                    salt = INITIAL_ROLL_SALT,
+                )
+                newlyGenerated += coord
+            }
+        }
+
+        if (newlyGenerated.isEmpty()) return GenerationResult(emptyMap())
+
+        val adjacencyTargets = newlyGenerated
+            .asSequence()
+            .flatMap { neighborhood(it).asSequence() }
+            .filterTo(mutableSetOf()) { merged[it]?.generated == true }
+        if (merged[center]?.generated == true) adjacencyTargets += center
+
+        val withAdjacency = recomputeAdjacency(merged, adjacencyTargets)
         val changed = adjacencyTargets
             .filterTo(linkedSetOf()) { coord ->
                 coord in newlyGenerated || withAdjacency[coord] != knownChunks[coord]
@@ -134,10 +178,9 @@ class SeededMineGenerator(
     }
 }
 
-fun mineDensityForChunk(coord: ChunkCoord): Float {
-    val distance = maxOf(abs(coord.cx.toLong()), abs(coord.cy.toLong()))
-    return (BASE_DENSITY + distance * DENSITY_PER_CHUNK).coerceAtMost(MAX_DENSITY)
-}
+/** Maps a 64-bit mix into `[0, 1)` using the top 53 bits (same construction as `Random.nextDouble`). */
+internal fun unitInterval(mixed: Long): Double =
+    (mixed ushr 11).toDouble() * (1.0 / (1L shl 53).toDouble())
 
 /**
  * Recomputes adjacency for generated [targets], counting mines in every generated chunk supplied

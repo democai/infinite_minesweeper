@@ -18,6 +18,11 @@ object BoardPalette {
     val CellHiddenShadow = Color(0xFF1A1A20)
     val CellRevealed = Color(0xFF1C1C22)
     val CellGridLine = Color(0xFF2A2A30)
+    /** Soft border around each 8×8 selector so chunk boundaries read at a glance. */
+    val ChunkOutline = Color(0x55D4AF37)
+
+    /** Soft cool wash over solved selectors — faint so dark cells and gold digits still read. */
+    val SolvedHighlight = Color(0x184A90A8)
 
     val Flag = Color(0xFFE53935)
     val FlagPole = Color(0xFFE0E0E0)

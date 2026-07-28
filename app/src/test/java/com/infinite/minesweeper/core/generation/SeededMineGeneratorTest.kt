@@ -46,17 +46,45 @@ class SeededMineGeneratorTest {
     }
 
     @Test
-    fun densityUsesChebyshevDistanceAndCaps() {
-        val generator = SeededMineGenerator(seed = 0L)
+    fun densityIsSeedHashedUniformInBandAndDeterministic() {
+        val generator = SeededMineGenerator(seed = 0xC0FFEEL)
+        val home = generator.mineDensityFor(ChunkCoord(0, 0))
+        val far = generator.mineDensityFor(ChunkCoord(12, 50))
+        val other = generator.mineDensityFor(ChunkCoord(-10, 4))
 
-        assertEquals(0.156f, generator.mineDensityFor(ChunkCoord(0, 0)), 0.000001f)
-        assertEquals(0.256f, generator.mineDensityFor(ChunkCoord(-10, 4)), 0.000001f)
-        assertEquals(0.35f, generator.mineDensityFor(ChunkCoord(12, 50)), 0.000001f)
-        assertEquals(
-            0.35f,
-            generator.mineDensityFor(ChunkCoord(Int.MIN_VALUE, 0)),
-            0.000001f,
+        assertTrue(home in 0.156f..0.35f)
+        assertTrue(far in 0.156f..0.35f)
+        assertTrue(other in 0.156f..0.35f)
+        // Same seed+coord always yields the same density (independent of Chebyshev distance).
+        assertEquals(home, SeededMineGenerator(seed = 0xC0FFEEL).mineDensityFor(ChunkCoord(0, 0)))
+        assertEquals(far, SeededMineGenerator(seed = 0xC0FFEEL).mineDensityFor(ChunkCoord(12, 50)))
+        // Different coords typically differ; at least one of these pairs must (hash avalanche).
+        assertTrue(
+            "Expected density to vary across chunk coordinates for a fixed seed",
+            home != far || home != other || far != other,
         )
+    }
+
+    @Test
+    fun ensureNeighborsGeneratedIsDeterministicAndAppliesNoExclusion() = runTest {
+        val generator = SeededMineGenerator(seed = 42L)
+        val initial = generator.generateForFirstTouch(CellCoord(0, 0), emptyMap()).chunks
+        val center = ChunkCoord(1, 0)
+
+        val first = generator.ensureNeighborsGenerated(center, initial)
+        val second = generator.ensureNeighborsGenerated(center, initial)
+        assertEquals(first, second)
+        assertTrue(ChunkCoord(2, 0) in first.chunks)
+
+        // Empty exclusion: a cell that would be punched by a first-touch at (15,0) can still be a mine.
+        val preGenerated = (initial + first.chunks).getValue(ChunkCoord(2, 0))
+        val firstTouchInto = generator.generateForFirstTouch(
+            CellCoord(15, 0),
+            initial + first.chunks,
+        )
+        // Chunk (2,0) already generated — must not be re-rolled by a later first-touch.
+        assertFalse(ChunkCoord(2, 0) in firstTouchInto.chunks)
+        assertEquals(preGenerated, (initial + first.chunks).getValue(ChunkCoord(2, 0)))
     }
 
     @Test

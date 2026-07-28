@@ -3,6 +3,7 @@ package com.infinite.minesweeper.core.cache
 import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkRepository
+import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameMeta
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -154,6 +155,9 @@ class ChunkCacheTest {
             return persisted.filterKeys { it in coords }
         }
 
+        override suspend fun getLockedChunks(): Map<ChunkCoord, Chunk> =
+            persisted.filterValues { it.status == ChunkStatus.LOCKED }
+
         override suspend fun saveChunk(chunk: Chunk) {
             events += "save:${chunk.coord.cx},${chunk.coord.cy}"
             persisted[chunk.coord] = chunk
@@ -173,6 +177,10 @@ class ChunkCacheTest {
         override suspend fun flush() {
             events += "flush"
             if (failFlush) error("flush failed")
+        }
+
+        override suspend fun clearAll() {
+            persisted.clear()
         }
     }
 }

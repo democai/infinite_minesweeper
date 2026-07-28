@@ -36,6 +36,7 @@ internal object ChunkMapper {
             viewportX = meta.viewportX,
             viewportY = meta.viewportY,
             zoom = meta.zoom,
+            hasEverRevealed = meta.hasEverRevealed,
         )
 
     fun toDomain(entity: GameMetaEntity): GameMeta =
@@ -46,5 +47,6 @@ internal object ChunkMapper {
             viewportX = entity.viewportX,
             viewportY = entity.viewportY,
             zoom = entity.zoom,
+            hasEverRevealed = entity.hasEverRevealed,
         )
 }

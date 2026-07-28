@@ -7,6 +7,7 @@ import com.infinite.minesweeper.core.model.Chunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameEvent
+import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
 import com.infinite.minesweeper.core.model.MineGenerator
 import kotlinx.coroutines.CoroutineDispatcher
@@ -28,9 +29,8 @@ data class LockTransition(
  * Consumes T8's [GameEvent.ChunkLocked] and [GameEvent.ChunkCleared] transitions and applies the
  * selector fail rules.
  *
- * The caller serializes calls with game-engine dispatches and publishes [LockTransition.state]
- * before processing the next action. Keeping that ordering explicit avoids a collector racing a
- * subsequent player input, and lets T13 wire this component to either an engine or a ViewModel.
+ * Derived [GameEvent]s in [LockTransition.events] must be fed back through [process] by the caller
+ * so cascading lock resolution can continue in the same dispatch.
  */
 class LockAndWipeMechanic(
     private val mineGenerator: MineGenerator,
@@ -49,23 +49,59 @@ class LockAndWipeMechanic(
         }
     }
 
+    /**
+     * Re-evaluates every soft-save-eligible lock in [state]. Used after window hydration so locks
+     * that became surrounded while a neighbor was evicted (or that were locked into an already-
+     * cleared ring) still resolve without waiting for another clear event.
+     *
+     * Runs on the caller's context (no dispatcher hop) so [DefaultGameEngine.syncWindow] can invoke
+     * it while holding its mutex without stalling under a test Main dispatcher.
+     */
+    fun recheckSurroundedLocks(state: GameState): LockTransition =
+        trySoftResolveLocks(
+            state = state,
+            candidates = state.chunks.keys
+                .filter { state.chunks[it]?.status == ChunkStatus.LOCKED }
+                .sortedWith(CHUNK_COORD_ORDER),
+        )
+
     private suspend fun onChunkLocked(
         event: GameEvent.ChunkLocked,
         state: GameState,
     ): LockTransition {
         val chunk = state.chunks[event.chunk] ?: return LockTransition(state)
-        if (chunk.status != ChunkStatus.LOCKED || !chunk.everSurrounded) {
-            return LockTransition(state)
+
+        // Second lifetime mine hit: hard wipe (§5.4).
+        if (chunk.status == ChunkStatus.LOCKED && chunk.everSurrounded) {
+            return hardWipe(event.chunk, state)
         }
 
+        // First lock: if the selector is already enclosed by solved territory, soft-resolve now.
+        // Without this, locking into a completed ring waits forever for a ChunkCleared that will
+        // never fire again (the screenshot bug).
+        if (chunk.status == ChunkStatus.LOCKED && !chunk.everSurrounded) {
+            return trySoftResolveLocks(state, listOf(event.chunk))
+        }
+
+        return LockTransition(state)
+    }
+
+    private fun onChunkCleared(
+        event: GameEvent.ChunkCleared,
+        state: GameState,
+    ): LockTransition = trySoftResolveLocks(
+        state = state,
+        candidates = neighboringChunkCoords(event.chunk).sortedWith(CHUNK_COORD_ORDER),
+    )
+
+    private suspend fun hardWipe(coord: ChunkCoord, state: GameState): LockTransition {
+        val chunk = state.chunks.getValue(coord)
         val oldFlagCount = chunk.cells.count { it.state == CellState.FLAGGED }
-        val rerolled = mineGenerator.reroll(event.chunk, state.chunks).chunks
-        val generatedChunk = requireNotNull(rerolled[event.chunk]) {
-            "MineGenerator.reroll must return the wiped chunk ${event.chunk}"
+        val rerolled = mineGenerator.reroll(coord, state.chunks).chunks
+        val generatedChunk = requireNotNull(rerolled[coord]) {
+            "MineGenerator.reroll must return the wiped chunk $coord"
         }
 
-        // Enforce the wipe's domain invariants at this boundary. In particular, a generator must
-        // not accidentally preserve flags or the exploded marker from the previous layout.
         val wipedChunk = generatedChunk.copy(
             cells = generatedChunk.cells.map { cell ->
                 cell.copy(state = CellState.HIDDEN)
@@ -76,7 +112,7 @@ class LockAndWipeMechanic(
         )
         val chunks = state.chunks.toMutableMap().apply {
             putAll(rerolled)
-            put(event.chunk, wipedChunk)
+            put(coord, wipedChunk)
         }
         val updated = state.copy(
             chunks = chunks,
@@ -85,33 +121,42 @@ class LockAndWipeMechanic(
                 selectorsWiped = state.meta.selectorsWiped + 1,
             ),
         )
-        return LockTransition(updated, listOf(GameEvent.ChunkWiped(event.chunk)))
+        return LockTransition(updated, listOf(GameEvent.ChunkWiped(coord)))
     }
 
-    private fun onChunkCleared(
-        event: GameEvent.ChunkCleared,
+    private fun trySoftResolveLocks(
         state: GameState,
+        candidates: Collection<ChunkCoord>,
     ): LockTransition {
         var chunks = state.chunks
+        var meta = state.meta
         val emitted = mutableListOf<GameEvent>()
+        val pending = ArrayDeque(candidates)
+        val visited = hashSetOf<ChunkCoord>()
 
-        // One cleared selector can be shared by several locked selectors. Re-evaluate all of them
-        // against the latest working map so each lock resolves (or remains locked) independently.
-        for (candidate in neighboringChunkCoords(event.chunk).sortedWith(CHUNK_COORD_ORDER)) {
+        while (pending.isNotEmpty()) {
+            val candidate = pending.removeFirst()
+            if (!visited.add(candidate)) continue
             val locked = chunks[candidate] ?: continue
             if (locked.status != ChunkStatus.LOCKED) continue
-            // A selector only receives one soft save. Normally the preceding ChunkLocked event
-            // has already wiped this case; retaining the guard here keeps delayed/duplicated
-            // ChunkCleared delivery from granting a second soft resolution.
             if (locked.everSurrounded) continue
             if (!isSurrounded(candidate, chunks)) continue
 
             chunks = softResolve(candidate, chunks)
             emitted += GameEvent.ChunkSoftResolved(candidate)
+
+            val completion = maybeCompleteAfterSoftResolve(candidate, chunks, meta)
+            chunks = completion.chunks
+            meta = completion.meta
+            if (completion.cleared) {
+                emitted += GameEvent.ChunkCleared(candidate)
+                pending.addAll(neighboringChunkCoords(candidate).sortedWith(CHUNK_COORD_ORDER))
+            }
         }
 
+        val stateChanged = chunks !== state.chunks || meta != state.meta
         return LockTransition(
-            state = if (chunks === state.chunks) state else state.copy(chunks = chunks),
+            state = if (!stateChanged) state else state.copy(chunks = chunks, meta = meta),
             events = emitted,
         )
     }
@@ -150,19 +195,65 @@ class LockAndWipeMechanic(
         return recomputeAdjacency(patched, targets)
     }
 
+    private fun maybeCompleteAfterSoftResolve(
+        coord: ChunkCoord,
+        chunks: Map<ChunkCoord, Chunk>,
+        meta: GameMeta,
+    ): SoftResolveCompletion {
+        val chunk = chunks.getValue(coord)
+        val hiddenNonMineRemaining = chunk.cells.any { it.state == CellState.HIDDEN && !it.isMine }
+        if (hiddenNonMineRemaining) {
+            return SoftResolveCompletion(chunks, meta, cleared = false)
+        }
+
+        val updatedCells = chunk.cells.toMutableList()
+        var newlyFlagged = 0
+        for ((index, cell) in chunk.cells.withIndex()) {
+            if (cell.state == CellState.HIDDEN) {
+                updatedCells[index] = cell.copy(state = CellState.FLAGGED)
+                newlyFlagged++
+            }
+        }
+        val completed = chunks.toMutableMap().apply {
+            put(coord, chunk.copy(cells = updatedCells))
+        }
+        return SoftResolveCompletion(
+            chunks = completed,
+            meta = meta.copy(
+                flagsPlaced = meta.flagsPlaced + newlyFlagged,
+                selectorsCleared = meta.selectorsCleared + 1,
+            ),
+            cleared = true,
+        )
+    }
+
+    /**
+     * A lock soft-resolves when every non-locked neighbor is [Chunk.isSolved] (same definition as
+     * the blue "solved" tint). Peer locks in the same pocket are skipped so a cluster enclosed by
+     * solved selectors can unlock together instead of deadlocking on each other.
+     */
     private fun isSurrounded(
         coord: ChunkCoord,
         chunks: Map<ChunkCoord, Chunk>,
     ): Boolean {
         val neighbors = neighboringChunkCoords(coord)
         if (neighbors.size != 8) return false
-        return neighbors.all { neighborCoord ->
-            val neighbor = chunks[neighborCoord] ?: return@all false
-            neighbor.status != ChunkStatus.LOCKED &&
-                neighbor.generated &&
-                neighbor.cells.all { it.isMine || it.state == CellState.REVEALED }
+        var clearedNeighbors = 0
+        for (neighborCoord in neighbors) {
+            val neighbor = chunks[neighborCoord] ?: return false
+            if (neighbor.status == ChunkStatus.LOCKED) continue
+            if (!neighbor.isSolved) return false
+            clearedNeighbors++
         }
+        // A pure lock-clump with no solved ring must not unlock itself.
+        return clearedNeighbors > 0
     }
+
+    private data class SoftResolveCompletion(
+        val chunks: Map<ChunkCoord, Chunk>,
+        val meta: GameMeta,
+        val cleared: Boolean,
+    )
 }
 
 private val CHUNK_COORD_ORDER = compareBy<ChunkCoord>({ it.cy }, { it.cx })

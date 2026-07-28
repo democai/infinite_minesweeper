@@ -65,8 +65,8 @@ Parallelism windows: {T2, T3, T5} together, then {T4, T6} together, then {T7, T8
 
 ### T4. Mine generation engine
 - **Deps:** T1, T2 | **Owns:** `core/generation/`
-- **Do:** Seeded `MineGenerator`: distance-scaled density (base 0.156, +0.01/chunk Chebyshev, cap 0.35), first-touch-safe exclusion zone, lazy-neighbor generation, cross-chunk adjacency computation.
-- **Tests:** fixed-seed determinism, exclusion zone never contains a mine, density function values at d = 0/10/50, adjacency correctness on hand-built 3×3-chunk fixtures including chunk-boundary cells.
+- **Do:** Seeded `MineGenerator`: seed-hashed per-chunk density (uniform in `[0.156, 0.35]`), first-touch-safe exclusion zone, lazy-neighbor generation, `ensureNeighborsGenerated` for stable border numbers, cross-chunk adjacency computation.
+- **Tests:** fixed-seed determinism, exclusion zone never contains a mine, density in-band and seed-deterministic across coords, adjacency correctness on hand-built 3×3-chunk fixtures including chunk-boundary cells.
 
 ### T6. Static renderer
 - **Deps:** T1, T2, T5 | **Owns:** `ui/board/BoardCanvas.kt`, `ui/board/CellDrawer.kt`

@@ -1,12 +1,13 @@
 package com.infinite.minesweeper.ui.game
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.FloatingActionButton
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -19,10 +20,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -33,6 +34,7 @@ import com.infinite.minesweeper.ui.board.BoardEffect
 import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
 import com.infinite.minesweeper.ui.board.rememberViewportState
 import com.infinite.minesweeper.ui.hud.GameHud
+import com.infinite.minesweeper.ui.settings.LongPressDuration
 import com.infinite.minesweeper.ui.settings.SettingsRoute
 import com.infinite.minesweeper.ui.settings.TapKind
 import com.infinite.minesweeper.ui.theme.BoardDimens
@@ -40,6 +42,7 @@ import com.infinite.minesweeper.ui.theme.BoardPalette
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.runBlocking
 
 @Composable
 fun GameScreen(
@@ -47,9 +50,12 @@ fun GameScreen(
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    val longPressDuration by viewModel.inputBindingPreferences.longPressDuration
+        .collectAsStateWithLifecycle(initialValue = LongPressDuration.Default)
     val viewportState = rememberViewportState()
     var viewportRestored by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
+    BackHandler(enabled = showSettings) { showSettings = false }
 
     LaunchedEffect(state.isProcessing, viewportRestored) {
         if (!state.isProcessing && !viewportRestored) {
@@ -70,9 +76,6 @@ fun GameScreen(
     LaunchedEffect(viewportState, density) {
         val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
         snapshotFlow {
-            // Null until the canvas has been laid out at least once (viewport size still 0x0).
-            // An empty window would otherwise be indistinguishable from "nothing to keep" and
-            // wipe every chunk the engine holds before the player ever sees the board.
             viewportState.visibleChunkBounds(
                 baseCellSizePx = baseCellSizePx,
                 renderMarginChunks = DEFAULT_RETENTION_MARGIN_CHUNKS,
@@ -87,19 +90,31 @@ fun GameScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_STOP) viewModel.flush()
+            if (event == Lifecycle.Event.ON_STOP) {
+                runBlocking { viewModel.flushNow() }
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     if (showSettings) {
-        Column(modifier = modifier.fillMaxSize()) {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding(),
+        ) {
             TextButton(onClick = { showSettings = false }) {
-                Text("Back to game")
+                Text("Back to game", color = BoardPalette.AccentGold)
             }
             SettingsRoute(
                 preferences = viewModel.inputBindingPreferences,
+                onResetGame = {
+                    viewModel.resetGame()
+                    viewportRestored = false
+                    showSettings = false
+                },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -124,33 +139,26 @@ fun GameScreen(
         }
     }
 
-    Column(modifier = modifier.fillMaxSize()) {
+    Box(modifier = modifier.fillMaxSize()) {
+        ViewportBoardCanvas(
+            chunks = state.chunks.values,
+            viewportState = viewportState,
+            modifier = Modifier.fillMaxSize(),
+            onTap = { viewModel.dispatch(TapKind.TAP, it) },
+            onLongPress = { viewModel.dispatch(TapKind.LONG_PRESS, it) },
+            longPressTimeoutMs = longPressDuration.timeoutMs,
+            effect = effectChunk?.let {
+                BoardEffect(chunk = it, color = effectColor, alpha = effectAlpha.value)
+            },
+        )
         GameHud(
             state = state,
             viewportCenterX = viewportState.centerX,
             viewportCenterY = viewportState.centerY,
+            modifier = Modifier
+                .statusBarsPadding()
+                .zIndex(1f),
+            onSettingsClick = { showSettings = true },
         )
-        Box(modifier = Modifier.weight(1f)) {
-            ViewportBoardCanvas(
-                chunks = state.chunks.values,
-                viewportState = viewportState,
-                modifier = Modifier.fillMaxSize(),
-                onTap = { viewModel.dispatch(TapKind.TAP, it) },
-                onLongPress = { viewModel.dispatch(TapKind.LONG_PRESS, it) },
-                effect = effectChunk?.let {
-                    BoardEffect(chunk = it, color = effectColor, alpha = effectAlpha.value)
-                },
-            )
-            FloatingActionButton(
-                onClick = { showSettings = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(16.dp),
-                containerColor = BoardPalette.Surface,
-                contentColor = BoardPalette.AccentGold,
-            ) {
-                Text("⚙")
-            }
-        }
     }
 }

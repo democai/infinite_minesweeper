@@ -96,6 +96,22 @@ class GamePersistenceCoordinatorTest {
             return GenerationResult(changed)
         }
 
+        override suspend fun ensureNeighborsGenerated(
+            center: ChunkCoord,
+            knownChunks: Map<ChunkCoord, Chunk>,
+        ): GenerationResult {
+            val changed = linkedMapOf<ChunkCoord, Chunk>()
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    if (dx == 0 && dy == 0) continue
+                    val coord = ChunkCoord(center.cx + dx, center.cy + dy)
+                    if (knownChunks[coord]?.generated == true) continue
+                    changed[coord] = Chunk(coord = coord, generated = true)
+                }
+            }
+            return GenerationResult(changed)
+        }
+
         override suspend fun reroll(
             coord: ChunkCoord,
             knownChunks: Map<ChunkCoord, Chunk>,

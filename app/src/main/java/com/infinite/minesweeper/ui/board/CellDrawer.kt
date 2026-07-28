@@ -24,6 +24,9 @@ internal class CellDrawer(
     private val gridStrokePx: Float,
     private val numberLayouts: Array<TextLayoutResult?>,
 ) {
+    /** Exposed so chunk outlines can reuse the same hairline weight as the cell grid. */
+    val gridStrokeWidthPx: Float get() = gridStrokePx
+
     private val cellSize = Size(cellSizePx, cellSizePx)
     private val gridStroke = Stroke(width = gridStrokePx)
     private val flagStroke = (cellSizePx * 0.065f).coerceAtLeast(gridStrokePx)

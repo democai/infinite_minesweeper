@@ -22,4 +22,13 @@ data class Chunk(
             "Only a locked chunk may have lockedAt set"
         }
     }
+
+    /**
+     * True when every cell is revealed or flagged and the selector is not locked. Matches the
+     * player-visible "solved" state used by the blue tint and the lock surround check.
+     */
+    val isSolved: Boolean
+        get() = generated &&
+            status != ChunkStatus.LOCKED &&
+            cells.all { it.state == CellState.REVEALED || it.state == CellState.FLAGGED }
 }

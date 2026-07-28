@@ -50,6 +50,23 @@ class InputBindingPreferencesTest {
         secondScope.cancel()
     }
 
+    @Test
+    fun longPressDuration_defaultsToShort() = runTest {
+        val preferences = InputBindingPreferences(dataStore())
+
+        assertEquals(LongPressDuration.Default, preferences.longPressDuration.first())
+        assertEquals(LongPressDuration.SHORT, preferences.longPressDuration.first())
+    }
+
+    @Test
+    fun setLongPressDuration_persistsAndIsReadableBack() = runTest {
+        val preferences = InputBindingPreferences(dataStore())
+
+        preferences.setLongPressDuration(LongPressDuration.LONG)
+
+        assertEquals(LongPressDuration.LONG, preferences.longPressDuration.first())
+    }
+
     // A plain, non-test-scheduled scope: PreferenceDataStoreFactory's own internal actor
     // coroutine never completes, so handing it `runTest`'s TestScope would make the test wait on
     // that job forever (UncompletedCoroutinesError). Dispatchers.Unconfined still runs suspend

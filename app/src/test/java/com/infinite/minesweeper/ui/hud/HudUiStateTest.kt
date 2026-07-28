@@ -17,14 +17,27 @@ class HudUiStateTest {
     }
 
     @Test
-    fun toHudUiState_readsCountersFromMeta() {
+    fun formatSelectorFromHomeLabel_marksOriginAsHome() {
+        assertEquals("SEL: Home", formatSelectorFromHomeLabel(ChunkCoord(0, 0)))
+    }
+
+    @Test
+    fun formatSelectorFromHomeLabel_usesSignedOffsetsFromHome() {
+        assertEquals("SEL: +2, -1", formatSelectorFromHomeLabel(ChunkCoord(2, -1)))
+        assertEquals("SEL: -3, +4", formatSelectorFromHomeLabel(ChunkCoord(-3, 4)))
+    }
+
+    @Test
+    fun toHudUiState_readsCountersAndSelectorFromViewport() {
         val state = GameState(
             meta = GameMeta(flagsPlaced = 3, selectorsCleared = 2, selectorsWiped = 1),
         )
 
-        val hud = state.toHudUiState(viewportCenterX = 12.0, viewportCenterY = -8.0)
+        // Cell (20, -10) sits in chunk (2, -2) — 8 cells per selector.
+        val hud = state.toHudUiState(viewportCenterX = 20.0, viewportCenterY = -10.0)
 
-        assertEquals("X: 12 Y: -8", hud.coordinateLabel)
+        assertEquals("X: 20 Y: -10", hud.coordinateLabel)
+        assertEquals("SEL: +2, -2", hud.selectorLabel)
         assertEquals(3, hud.flagsPlaced)
         assertEquals(2, hud.selectorsCleared)
         assertEquals(1, hud.selectorsWiped)
@@ -42,6 +55,7 @@ class HudUiStateTest {
         val hud = GameState(chunks = chunks).toHudUiState(0.0, 0.0)
 
         assertEquals(2, hud.selectorsLocked)
+        assertEquals("SEL: Home", hud.selectorLabel)
     }
 
     @Test

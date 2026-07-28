@@ -10,11 +10,13 @@ renderers consume immutable `GameState` snapshots.
   other expensive work to a background dispatcher before doing it.
 - Every `ChunkRepository` function is main-safe. Its implementation owns database dispatcher
   switching. `saveChunk`, `saveChunks`, and `saveGameMeta` enqueue/coalesce writes; `flush` waits
-  until all writes queued before the call are durable.
+  until all writes queued before the call are durable. `getLockedChunks` returns every
+  currently-locked selector for cold-start surround rechecks.
 - `MineGenerator.mineDensityFor` is a small, pure calculation and is main-safe.
-- `MineGenerator.generateForFirstTouch` and `MineGenerator.reroll` are background-only. The engine
-  is responsible for calling them from a background dispatcher. Generator implementations are
-  deterministic for the same configured seed and equivalent inputs.
+- `MineGenerator.generateForFirstTouch`, `MineGenerator.ensureNeighborsGenerated`, and
+  `MineGenerator.reroll` are background-only. The engine is responsible for calling them from a
+  background dispatcher. Generator implementations are deterministic for the same configured seed
+  and equivalent inputs.
 
 ## Ownership and mutability
 

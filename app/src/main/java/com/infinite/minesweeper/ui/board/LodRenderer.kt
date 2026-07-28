@@ -43,14 +43,9 @@ object LodRenderer {
 
     /**
      * Completed selectors have no hidden (or exploded) cells left: every cell is revealed or
-     * flagged. Detection uses only player-visible [CellState] values — never [Cell.isMine].
+     * flagged. Delegates to [Chunk.isSolved] so LOD, the blue tint, and lock surround agree.
      */
-    fun isCompletedChunk(chunk: Chunk): Boolean {
-        if (!chunk.generated || chunk.status == ChunkStatus.LOCKED) return false
-        return chunk.cells.all { cell ->
-            cell.state == CellState.REVEALED || cell.state == CellState.FLAGGED
-        }
-    }
+    fun isCompletedChunk(chunk: Chunk): Boolean = chunk.isSolved
 
     /**
      * Packs 64 ARGB8888 pixels in row-major order (`y * 8 + x`). Overrides are applied first.

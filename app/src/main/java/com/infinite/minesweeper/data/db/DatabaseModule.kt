@@ -2,6 +2,8 @@ package com.infinite.minesweeper.data.db
 
 import android.content.Context
 import androidx.room.Room
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.infinite.minesweeper.core.model.ChunkRepository
 import dagger.Module
 import dagger.Provides
@@ -14,6 +16,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
+/** Adds `GameMeta.hasEverRevealed`, defaulting existing rows to false (an untouched board). */
+internal val MIGRATION_1_2 = object : Migration(1, 2) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE game_meta ADD COLUMN hasEverRevealed INTEGER NOT NULL DEFAULT 0",
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -24,7 +35,9 @@ object DatabaseModule {
             context,
             MinesweeperDatabase::class.java,
             DATABASE_NAME,
-        ).build()
+        )
+            .addMigrations(MIGRATION_1_2)
+            .build()
 
     @Provides
     fun provideChunkDao(database: MinesweeperDatabase): ChunkDao = database.chunkDao()
