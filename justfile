@@ -11,11 +11,12 @@ default:
 build:
     ./gradlew assembleDebug
 
-# Build optimized (release) APK; prints its path when done
+# Build a sideloadable release APK (signed with the debug key) and print its path
 apk:
     ./gradlew assembleRelease
-    @apk="$(ls app/build/outputs/apk/release/*.apk | head -n1)"; \
-    echo "✅ Optimized APK: $(realpath "$apk")"
+    @apk="$(ls app/build/outputs/apk/release/app-release.apk)"; \
+    test -f "$apk" || { echo "❌ Expected signed app-release.apk (got unsigned?)"; exit 1; }; \
+    echo "✅ Sideloadable APK: $(realpath "$apk")"
 
 # Unit tests (JVM)
 test:

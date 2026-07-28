@@ -22,6 +22,9 @@ android {
 
     buildTypes {
         release {
+            // No dedicated release keystore yet — sign with the debug key so
+            // `just apk` / assembleRelease produces a sideloadable package.
+            signingConfig = signingConfigs.getByName("debug")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
