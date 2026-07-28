@@ -1,20 +1,59 @@
-*.iml
-.env
+# Gradle
 .gradle/
-.idea/
-/local.properties
-.DS_Store
-/build/
-/captures/
-.externalNativeBuild/
-.cxx/
+build/
+**/build/
+
+# Kotlin compiler / incremental caches
+.kotlin/
+
+# Local SDK / machine config
+local.properties
+
+# Environment / secrets (justfile sets dotenv-load := false; keep out of VCS)
+.env
+.env.*
+!.env.example
+
+# Signing
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+
+# Google Services / Firebase
+google-services.json
+
+# Built artifacts
 *.apk
 *.ap_
 *.aab
 *.dex
+*.class
+output-metadata.json
+
+# Native / NDK
+.externalNativeBuild/
+.cxx/
+captures/
+
+# Profiling / logs / OS junk
+*.hprof
+*.log
+.DS_Store
+Thumbs.db
+
+# IDE
+*.iml
+*.ipr
+*.iws
+.idea/
+.vscode/
+out/
 bin/
 gen/
-out/
-.kotlin/
-app/build/
-**/build/
+
+# AI / agent local state
+.claude/
+.cursor/
+.codex/
+CLAUDE.local.md
