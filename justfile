@@ -11,6 +11,12 @@ default:
 build:
     ./gradlew assembleDebug
 
+# Build optimized (release) APK; prints its path when done
+apk:
+    ./gradlew assembleRelease
+    @apk="$(ls app/build/outputs/apk/release/*.apk | head -n1)"; \
+    echo "✅ Optimized APK: $(realpath "$apk")"
+
 # Unit tests (JVM)
 test:
     ./gradlew test
