@@ -12,7 +12,8 @@ class HudUiStateTest {
 
     @Test
     fun formatCoordinateLabel_matchesReferenceReadoutStyle() {
-        assertEquals("X: -76 Y: 59", formatCoordinateLabel(-76.4, 59.2))
+        // Display Y is north-positive: internal +59.2 south → HUD Y: -59.
+        assertEquals("X: -76 Y: -59", formatCoordinateLabel(-76.4, 59.2))
         assertEquals("X: 0 Y: 0", formatCoordinateLabel(0.0, 0.0))
     }
 
@@ -23,8 +24,9 @@ class HudUiStateTest {
 
     @Test
     fun formatSelectorFromHomeLabel_usesSignedOffsetsFromHome() {
-        assertEquals("SEL: +2, -1", formatSelectorFromHomeLabel(ChunkCoord(2, -1)))
-        assertEquals("SEL: -3, +4", formatSelectorFromHomeLabel(ChunkCoord(-3, 4)))
+        // Display CY is north-positive: internal cy=-1 (north of Home) → HUD +1.
+        assertEquals("SEL: +2, +1", formatSelectorFromHomeLabel(ChunkCoord(2, -1)))
+        assertEquals("SEL: -3, -4", formatSelectorFromHomeLabel(ChunkCoord(-3, 4)))
     }
 
     @Test
@@ -34,10 +36,11 @@ class HudUiStateTest {
         )
 
         // Cell (20, -10) sits in chunk (2, -2) — 8 cells per selector.
+        // HUD negates Y: cell Y -10 → label +10; chunk cy -2 → SEL +2.
         val hud = state.toHudUiState(viewportCenterX = 20.0, viewportCenterY = -10.0)
 
-        assertEquals("X: 20 Y: -10", hud.coordinateLabel)
-        assertEquals("SEL: +2, -2", hud.selectorLabel)
+        assertEquals("X: 20 Y: 10", hud.coordinateLabel)
+        assertEquals("SEL: +2, +2", hud.selectorLabel)
         assertEquals(3, hud.flagsPlaced)
         assertEquals(2, hud.selectorsCleared)
         assertEquals(1, hud.selectorsWiped)

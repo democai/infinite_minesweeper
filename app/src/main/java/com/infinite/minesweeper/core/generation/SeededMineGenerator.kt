@@ -27,16 +27,17 @@ private const val DENSITY_SALT = 0xD15C0517A17C4E3L
  * roll. Generation order therefore does not consume shared random state; the only intentional
  * layout difference is removal of mines that fall inside a call's first-touch exclusion zone.
  *
- * Per-chunk mine density is an independent hash of `(seed, coord)` mapped uniformly into
- * [[BASE_DENSITY], [MAX_DENSITY]], so nearby selectors mix easy and hard rather than ramping with
- * distance from the origin.
+ * Per-chunk mine density is an independent hash of `(seed, coord)` mapped into
+ * [[BASE_DENSITY], [MAX_DENSITY]] with a cubic ease (`u³`), so most selectors sit easy /
+ * intermediate and hard ones are rare spice rather than ramping with distance from the origin.
  */
 class SeededMineGenerator(
     private val seed: Long,
 ) : MineGenerator {
     override fun mineDensityFor(coord: ChunkCoord): Float {
         val u = unitInterval(chunkSeed(coord, DENSITY_SALT))
-        return BASE_DENSITY + u.toFloat() * (MAX_DENSITY - BASE_DENSITY)
+        val skewed = u * u * u
+        return BASE_DENSITY + skewed.toFloat() * (MAX_DENSITY - BASE_DENSITY)
     }
 
     override suspend fun generateForFirstTouch(

@@ -46,7 +46,7 @@ class SeededMineGeneratorTest {
     }
 
     @Test
-    fun densityIsSeedHashedUniformInBandAndDeterministic() {
+    fun densityIsSeedHashedEasyBiasedInBandAndDeterministic() {
         val generator = SeededMineGenerator(seed = 0xC0FFEEL)
         val home = generator.mineDensityFor(ChunkCoord(0, 0))
         val far = generator.mineDensityFor(ChunkCoord(12, 50))
@@ -62,6 +62,23 @@ class SeededMineGeneratorTest {
         assertTrue(
             "Expected density to vary across chunk coordinates for a fixed seed",
             home != far || home != other || far != other,
+        )
+
+        // Cubic ease: most mass near easy end — median below band midpoint, hard share rare.
+        val samples = (-10..10).flatMap { cy ->
+            (-10..10).map { cx -> generator.mineDensityFor(ChunkCoord(cx, cy)) }
+        }.sorted()
+        assertEquals(441, samples.size)
+        assertTrue(samples.all { it in 0.156f..0.35f })
+        val midpoint = (0.156f + 0.35f) / 2f
+        assertTrue(
+            "Expected median density below band midpoint under cubic ease, was ${samples[samples.size / 2]}",
+            samples[samples.size / 2] < midpoint,
+        )
+        val hardShare = samples.count { it >= 0.30f }.toFloat() / samples.size
+        assertTrue(
+            "Expected hard density share well below uniform (~26%), was $hardShare",
+            hardShare < 0.20f,
         )
     }
 
