@@ -20,19 +20,20 @@ class InputBindingPreferencesTest {
     val tempFolder = TemporaryFolder()
 
     @Test
-    fun binding_defaultsToTapRevealWhenUnset() = runTest {
+    fun binding_defaultsToTapFlagWhenUnset() = runTest {
         val preferences = InputBindingPreferences(dataStore())
 
         assertEquals(InputBinding.Default, preferences.binding.first())
+        assertEquals(InputBinding.TAP_FLAG_LONG_PRESS_REVEAL, preferences.binding.first())
     }
 
     @Test
     fun setBinding_persistsAndIsReadableBack() = runTest {
         val preferences = InputBindingPreferences(dataStore())
 
-        preferences.setBinding(InputBinding.TAP_FLAG_LONG_PRESS_REVEAL)
+        preferences.setBinding(InputBinding.TAP_REVEAL_LONG_PRESS_FLAG)
 
-        assertEquals(InputBinding.TAP_FLAG_LONG_PRESS_REVEAL, preferences.binding.first())
+        assertEquals(InputBinding.TAP_REVEAL_LONG_PRESS_FLAG, preferences.binding.first())
     }
 
     @Test
@@ -41,21 +42,21 @@ class InputBindingPreferencesTest {
 
         val firstScope = dataStoreScope()
         val first = InputBindingPreferences(PreferenceDataStoreFactory.create(scope = firstScope) { file })
-        first.setBinding(InputBinding.TAP_FLAG_LONG_PRESS_REVEAL)
+        first.setBinding(InputBinding.TAP_REVEAL_LONG_PRESS_FLAG)
         firstScope.cancel()
 
         val secondScope = dataStoreScope()
         val second = InputBindingPreferences(PreferenceDataStoreFactory.create(scope = secondScope) { file })
-        assertEquals(InputBinding.TAP_FLAG_LONG_PRESS_REVEAL, second.binding.first())
+        assertEquals(InputBinding.TAP_REVEAL_LONG_PRESS_FLAG, second.binding.first())
         secondScope.cancel()
     }
 
     @Test
-    fun longPressDuration_defaultsToShort() = runTest {
+    fun longPressDuration_defaultsToMedium() = runTest {
         val preferences = InputBindingPreferences(dataStore())
 
         assertEquals(LongPressDuration.Default, preferences.longPressDuration.first())
-        assertEquals(LongPressDuration.SHORT, preferences.longPressDuration.first())
+        assertEquals(LongPressDuration.MEDIUM, preferences.longPressDuration.first())
     }
 
     @Test

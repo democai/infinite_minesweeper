@@ -8,7 +8,7 @@ Requires **Android 15 (API 35)** and [just](https://github.com/casey/just).
 
 ```bash
 just build    # debug APK (assembleDebug)
-just apk      # sideloadable release APK (debug-signed)
+just apk      # sideloadable release APK (debug-signed; auto-bumps versionCode)
 just test     # JVM unit tests
 just lint     # Android lint
 just check    # test + lint
@@ -25,8 +25,10 @@ The board is unbounded. Cells live in **8×8 selectors**. Pinch to zoom, drag to
 
 | Action | Default | Alternate (settings) |
 |---|---|---|
-| Reveal | Tap | Long-press |
-| Flag | Long-press | Tap |
+| Reveal | Long-press | Tap |
+| Flag | Tap | Long-press |
+
+Long-press duration defaults to **Medium** (400 ms); Short and Long are available in settings.
 
 **Basics**
 
@@ -40,4 +42,4 @@ The board is unbounded. Cells live in **8×8 selectors**. Pinch to zoom, drag to
 2. Clear all **8 neighbor selectors** → first recovery is soft: the mine is removed and the selector unlocks.
 3. Hit a mine again in a selector that has already been surrounded → **hard wipe**: the whole selector resets and is re-rolled.
 
-Progress is saved automatically; settings hold the tap/long-press binding preference.
+Progress is saved automatically; settings hold the tap/long-press binding and long-press duration.

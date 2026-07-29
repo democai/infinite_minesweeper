@@ -13,7 +13,7 @@ build:
 
 # Build a sideloadable release APK (signed with the debug key) and print its path
 apk:
-    ./gradlew assembleRelease
+    ./gradlew assembleRelease printApkVersion
     @apk="$(ls app/build/outputs/apk/release/app-release.apk)"; \
     test -f "$apk" || { echo "❌ Expected signed app-release.apk (got unsigned?)"; exit 1; }; \
     echo "✅ Sideloadable APK: $(realpath "$apk")"

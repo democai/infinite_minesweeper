@@ -6,6 +6,31 @@ plugins {
     alias(libs.plugins.hilt)
 }
 
+// Sideload-friendly versioning: the system package installer rejects updates unless
+// versionCode strictly increases. Use wall-clock seconds since a fixed epoch so every
+// `just apk` can install over the previous build without a git commit. versionName
+// still reflects git so the human-readable string tracks the tree.
+val versionEpochSeconds = 1_720_000_000L // ~2024-07-05 UTC
+
+fun gitStdout(vararg args: String): String {
+    val process =
+        ProcessBuilder("git", *args)
+            .directory(rootProject.projectDir)
+            .redirectErrorStream(true)
+            .start()
+    val output = process.inputStream.bufferedReader().readText().trim()
+    check(process.waitFor() == 0 && output.isNotEmpty()) {
+        "git ${args.joinToString(" ")} failed: $output"
+    }
+    return output
+}
+
+val apkVersionCode =
+    ((System.currentTimeMillis() / 1000L) - versionEpochSeconds).toInt().also {
+        check(it > 0) { "Clock before version epoch; cannot compute versionCode ($it)" }
+    }
+val apkVersionName = "0.1.${gitStdout("rev-list", "--count", "HEAD")}+${gitStdout("rev-parse", "--short", "HEAD")}"
+
 android {
     namespace = "com.infinite.minesweeper"
     compileSdk = 35
@@ -14,8 +39,8 @@ android {
         applicationId = "com.infinite.minesweeper"
         minSdk = 35
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = apkVersionCode
+        versionName = apkVersionName
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -94,4 +119,12 @@ dependencies {
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+}
+
+tasks.register("printApkVersion") {
+    group = "help"
+    description = "Print the versionCode / versionName used for this build"
+    doLast {
+        println("✅ versionCode=$apkVersionCode versionName=$apkVersionName")
+    }
 }

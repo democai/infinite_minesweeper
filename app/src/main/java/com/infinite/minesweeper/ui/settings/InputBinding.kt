@@ -12,6 +12,6 @@ enum class InputBinding {
     ;
 
     companion object {
-        val Default: InputBinding = TAP_REVEAL_LONG_PRESS_FLAG
+        val Default: InputBinding = TAP_FLAG_LONG_PRESS_REVEAL
     }
 }

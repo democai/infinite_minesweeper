@@ -12,44 +12,44 @@ class InputActionMapperTest {
     private val cell = CellCoord(3, 4)
 
     @Test
-    fun defaultBinding_tapOnHidden_reveals() {
+    fun defaultBinding_tapOnHidden_flags() {
         val action = InputActionMapper.map(
             gesture = TapKind.TAP,
             cell = cell,
             cellState = CellState.HIDDEN,
-            binding = InputBinding.TAP_REVEAL_LONG_PRESS_FLAG,
-        )
-        assertEquals(GameAction.Reveal(cell), action)
-    }
-
-    @Test
-    fun defaultBinding_longPressOnHidden_flags() {
-        val action = InputActionMapper.map(
-            gesture = TapKind.LONG_PRESS,
-            cell = cell,
-            cellState = CellState.HIDDEN,
-            binding = InputBinding.TAP_REVEAL_LONG_PRESS_FLAG,
+            binding = InputBinding.Default,
         )
         assertEquals(GameAction.ToggleFlag(cell), action)
     }
 
     @Test
-    fun invertedBinding_swapsTapAndLongPressDispatch() {
+    fun defaultBinding_longPressOnHidden_reveals() {
+        val action = InputActionMapper.map(
+            gesture = TapKind.LONG_PRESS,
+            cell = cell,
+            cellState = CellState.HIDDEN,
+            binding = InputBinding.Default,
+        )
+        assertEquals(GameAction.Reveal(cell), action)
+    }
+
+    @Test
+    fun alternateBinding_swapsTapAndLongPressDispatch() {
         val tapAction = InputActionMapper.map(
             gesture = TapKind.TAP,
             cell = cell,
             cellState = CellState.HIDDEN,
-            binding = InputBinding.TAP_FLAG_LONG_PRESS_REVEAL,
+            binding = InputBinding.TAP_REVEAL_LONG_PRESS_FLAG,
         )
         val longPressAction = InputActionMapper.map(
             gesture = TapKind.LONG_PRESS,
             cell = cell,
             cellState = CellState.HIDDEN,
-            binding = InputBinding.TAP_FLAG_LONG_PRESS_REVEAL,
+            binding = InputBinding.TAP_REVEAL_LONG_PRESS_FLAG,
         )
 
-        assertEquals(GameAction.ToggleFlag(cell), tapAction)
-        assertEquals(GameAction.Reveal(cell), longPressAction)
+        assertEquals(GameAction.Reveal(cell), tapAction)
+        assertEquals(GameAction.ToggleFlag(cell), longPressAction)
     }
 
     @Test
