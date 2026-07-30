@@ -8,6 +8,8 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -20,8 +22,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.Lifecycle
@@ -29,6 +33,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.infinite.minesweeper.core.cache.DEFAULT_RETENTION_MARGIN_CHUNKS
+import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.ui.board.BoardEffect
 import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
@@ -122,7 +127,7 @@ fun GameScreen(
     }
 
     val effectAlpha = remember { Animatable(0f) }
-    var effectChunk by remember { mutableStateOf<com.infinite.minesweeper.core.model.ChunkCoord?>(null) }
+    var effectChunk by remember { mutableStateOf<ChunkCoord?>(null) }
     var effectColor by remember { mutableStateOf(Color.Transparent) }
     LaunchedEffect(viewModel) {
         viewModel.events.collect { event ->
@@ -139,6 +144,8 @@ fun GameScreen(
         }
     }
 
+    var resetChunkPrompt by remember { mutableStateOf<Pair<ChunkCoord, Offset>?>(null) }
+
     Box(modifier = modifier.fillMaxSize()) {
         ViewportBoardCanvas(
             chunks = state.chunks.values,
@@ -147,10 +154,30 @@ fun GameScreen(
             onTap = { viewModel.dispatch(TapKind.TAP, it) },
             onLongPress = { viewModel.dispatch(TapKind.LONG_PRESS, it) },
             longPressTimeoutMs = longPressDuration.timeoutMs,
+            onSolvedSelectorLongPress = { coord, position ->
+                if (state.chunks[coord]?.isSolved == true) resetChunkPrompt = coord to position
+            },
             effect = effectChunk?.let {
                 BoardEffect(chunk = it, color = effectColor, alpha = effectAlpha.value)
             },
         )
+        resetChunkPrompt?.let { (coord, position) ->
+            DropdownMenu(
+                expanded = true,
+                onDismissRequest = { resetChunkPrompt = null },
+                offset = with(density) {
+                    DpOffset(x = position.x.toDp(), y = position.y.toDp())
+                },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Reset selector") },
+                    onClick = {
+                        viewModel.resetSelector(coord)
+                        resetChunkPrompt = null
+                    },
+                )
+            }
+        }
         GameHud(
             state = state,
             viewportCenterX = viewportState.centerX,

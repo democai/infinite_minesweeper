@@ -2,6 +2,7 @@ package com.infinite.minesweeper.core.engine
 
 import com.infinite.minesweeper.core.coords.cellToLocalIndex
 import com.infinite.minesweeper.core.engine.lock.neighboringChunkCoords
+import com.infinite.minesweeper.core.generation.SeededMineGenerator
 import com.infinite.minesweeper.core.generation.recomputeAdjacency
 import com.infinite.minesweeper.core.model.Cell
 import com.infinite.minesweeper.core.model.CellCoord
@@ -561,6 +562,51 @@ class DefaultGameEngineTest {
         engine.dispatch(GameAction.Reveal(CellCoord(16, 1)))
         val stillB = engine.state.value.chunks.getValue(ChunkCoord(1, 0))
         assertEquals(snapshot, stillB.cells.map { it.adjacentMines to it.state })
+    }
+
+    @Test
+    fun resetSolvedChunkRerollsAFreshBoardWithoutIncrementingSelectorsWiped() = runTest {
+        val center = ChunkCoord(0, 0)
+        val generator = SeededMineGenerator(seed = 12345L)
+        val rolled = generator.reroll(center, emptyMap()).chunks.getValue(center)
+        // Make it "solved": every non-mine cell REVEALED, every mine cell FLAGGED.
+        val solvedCells = rolled.cells.map { cell ->
+            if (cell.isMine) cell.copy(state = CellState.FLAGGED) else cell.copy(state = CellState.REVEALED)
+        }
+        val solvedChunk = rolled.copy(cells = solvedCells)
+        val flagCount = solvedCells.count { it.state == CellState.FLAGGED }
+        val engine = DefaultGameEngine(
+            mineGenerator = generator,
+            initialState = GameState(
+                chunks = mapOf(center to solvedChunk),
+                meta = GameMeta(flagsPlaced = flagCount, selectorsCleared = 1),
+            ),
+            backgroundDispatcher = Dispatchers.Unconfined,
+        )
+        val events = mutableListOf<GameEvent>()
+        val collector = launch(Dispatchers.Unconfined) { engine.events.collect { events += it } }
+
+        engine.resetSolvedChunk(center)
+        collector.cancel()
+
+        val result = engine.state.value.chunks.getValue(center)
+        assertTrue(result.cells.all { it.state == CellState.HIDDEN })
+        assertEquals(ChunkStatus.NORMAL, result.status)
+        assertFalse(result.everSurrounded)
+        assertEquals(0, engine.state.value.meta.flagsPlaced)
+        assertEquals(0, engine.state.value.meta.selectorsWiped)
+        assertEquals(1, engine.state.value.meta.selectorsCleared)
+        assertEquals(listOf(GameEvent.ChunkWiped(center)), events)
+    }
+
+    @Test
+    fun resetSolvedChunkIsNoOpWhenChunkIsNotSolved() = runTest {
+        val chunk = chunkWithMines(ChunkCoord(0, 0), setOf(0 to 0))
+        val engine = engineWithChunk(chunk, cascadeRadiusChunks = 0)
+
+        engine.resetSolvedChunk(ChunkCoord(0, 0))
+
+        assertEquals(chunk, engine.state.value.chunks.getValue(ChunkCoord(0, 0)))
     }
 
     private fun engineWithChunk(chunk: Chunk, cascadeRadiusChunks: Int): DefaultGameEngine =

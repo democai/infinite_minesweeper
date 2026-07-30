@@ -176,6 +176,47 @@ class DefaultGameEngine(
             }
         }
     }
+
+    /**
+     * Player-initiated reset of an already-solved selector: rerolls its mines and returns every
+     * cell to hidden, mirroring [LockAndWipeMechanic]'s hard wipe exactly, except it does not
+     * increment [GameMeta.selectorsWiped] — that counter tracks mine-triggered hard wipes (an
+     * adverse event), whereas this is a deliberate, successful action the player chose to take.
+     * No-ops if the chunk is missing or not [Chunk.isSolved] (e.g. a stale UI request racing a
+     * state change).
+     */
+    suspend fun resetSolvedChunk(coord: ChunkCoord) {
+        dispatchMutex.withLock {
+            withContext(backgroundDispatcher) {
+                val snapshot = _state.value
+                val chunk = snapshot.chunks[coord] ?: return@withContext
+                if (!chunk.isSolved) return@withContext
+
+                val oldFlagCount = chunk.cells.count { it.state == CellState.FLAGGED }
+                val rerolled = mineGenerator.reroll(coord, snapshot.chunks).chunks
+                val generatedChunk = requireNotNull(rerolled[coord]) {
+                    "MineGenerator.reroll must return the reset chunk $coord"
+                }
+                val resetChunk = generatedChunk.copy(
+                    cells = generatedChunk.cells.map { it.copy(state = CellState.HIDDEN) },
+                    status = ChunkStatus.NORMAL,
+                    everSurrounded = false,
+                    lockedAt = null,
+                )
+                val chunks = snapshot.chunks.toMutableMap().apply {
+                    putAll(rerolled)
+                    put(coord, resetChunk)
+                }
+                _state.value = snapshot.copy(
+                    chunks = chunks,
+                    meta = snapshot.meta.copy(
+                        flagsPlaced = (snapshot.meta.flagsPlaced - oldFlagCount).coerceAtLeast(0),
+                    ),
+                )
+                _events.emit(GameEvent.ChunkWiped(coord))
+            }
+        }
+    }
 }
 
 /**

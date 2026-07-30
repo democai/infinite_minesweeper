@@ -11,13 +11,6 @@ import org.junit.Test
 class HudUiStateTest {
 
     @Test
-    fun formatCoordinateLabel_matchesReferenceReadoutStyle() {
-        // Display Y is north-positive: internal +59.2 south → HUD Y: -59.
-        assertEquals("X: -76 Y: -59", formatCoordinateLabel(-76.4, 59.2))
-        assertEquals("X: 0 Y: 0", formatCoordinateLabel(0.0, 0.0))
-    }
-
-    @Test
     fun formatSelectorFromHomeLabel_marksOriginAsHome() {
         assertEquals("SEL: Home", formatSelectorFromHomeLabel(ChunkCoord(0, 0)))
     }
@@ -32,18 +25,16 @@ class HudUiStateTest {
     @Test
     fun toHudUiState_readsCountersAndSelectorFromViewport() {
         val state = GameState(
-            meta = GameMeta(flagsPlaced = 3, selectorsCleared = 2, selectorsWiped = 1),
+            meta = GameMeta(flagsPlaced = 3, selectorsCleared = 2),
         )
 
         // Cell (20, -10) sits in chunk (2, -2) — 8 cells per selector.
-        // HUD negates Y: cell Y -10 → label +10; chunk cy -2 → SEL +2.
+        // HUD negates Y: chunk cy -2 → SEL +2.
         val hud = state.toHudUiState(viewportCenterX = 20.0, viewportCenterY = -10.0)
 
-        assertEquals("X: 20 Y: 10", hud.coordinateLabel)
         assertEquals("SEL: +2, +2", hud.selectorLabel)
         assertEquals(3, hud.flagsPlaced)
         assertEquals(2, hud.selectorsCleared)
-        assertEquals(1, hud.selectorsWiped)
         assertEquals(0, hud.selectorsLocked)
     }
 
@@ -64,20 +55,20 @@ class HudUiStateTest {
     @Test
     fun toHudUiState_updatesAcrossSuccessiveEngineTransitions() {
         // Simulates the sequence of GameState emissions an engine produces as events fire:
-        // a reveal places a flag, a mine hit locks a chunk, and a later wipe resolves it.
+        // a reveal places a flag, then a mine hit locks a chunk, then it resolves.
         var state = GameState()
         val afterFlag = state.copy(meta = state.meta.copy(flagsPlaced = 1)).also { state = it }
         val afterLock = state.copy(
             chunks = mapOf(ChunkCoord(0, 0) to Chunk(coord = ChunkCoord(0, 0), status = ChunkStatus.LOCKED)),
         ).also { state = it }
-        val afterWipe = state.copy(
+        val afterResolve = state.copy(
             chunks = mapOf(ChunkCoord(0, 0) to Chunk(coord = ChunkCoord(0, 0), status = ChunkStatus.NORMAL)),
-            meta = state.meta.copy(selectorsWiped = 1),
+            meta = state.meta.copy(selectorsCleared = 1),
         ).also { state = it }
 
         assertEquals(1, afterFlag.toHudUiState(0.0, 0.0).flagsPlaced)
         assertEquals(1, afterLock.toHudUiState(0.0, 0.0).selectorsLocked)
-        assertEquals(0, afterWipe.toHudUiState(0.0, 0.0).selectorsLocked)
-        assertEquals(1, afterWipe.toHudUiState(0.0, 0.0).selectorsWiped)
+        assertEquals(0, afterResolve.toHudUiState(0.0, 0.0).selectorsLocked)
+        assertEquals(1, afterResolve.toHudUiState(0.0, 0.0).selectorsCleared)
     }
 }

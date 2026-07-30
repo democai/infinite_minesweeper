@@ -123,6 +123,7 @@ fun ViewportBoardCanvas(
     onTap: (CellCoord) -> Unit = {},
     onLongPress: (CellCoord) -> Unit = {},
     longPressTimeoutMs: Long = LongPressDuration.Default.timeoutMs,
+    onSolvedSelectorLongPress: (ChunkCoord, Offset) -> Unit = { _, _ -> },
     effect: BoardEffect? = null,
 ) {
     val density = LocalDensity.current
@@ -172,6 +173,11 @@ fun ViewportBoardCanvas(
                 inputEnabled = !useLod,
                 onTap = onTap,
                 onLongPress = onLongPress,
+            )
+            .boardSelectorLongPress(
+                viewportState = viewportState,
+                enabled = !useLod,
+                onLongPress = onSolvedSelectorLongPress,
             )
             .viewportGestures(viewportState),
     ) {
@@ -230,7 +236,10 @@ fun ViewportBoardCanvas(
             )
         }
         if (useLod) {
-            val markerSizePx = with(density) { BoardDimens.HomeMarkerSizeDp.dp.toPx() }
+            val markerSizePx = (BoardDimens.HomeMarkerSizeCells * cellSizePx).coerceIn(
+                with(density) { BoardDimens.HomeMarkerMinSizeDp.dp.toPx() },
+                with(density) { BoardDimens.HomeMarkerMaxSizeDp.dp.toPx() },
+            )
             // Center of Home selector (chunk 0,0), not the top-left cell at world origin.
             val homeCenterWorld = CHUNK_SIDE_LENGTH / 2.0
             val markerCenterX =
@@ -306,6 +315,78 @@ private fun Modifier.boardInputGestures(
             }
         }
     }
+}
+
+private const val SELECTOR_LONG_PRESS_TIMEOUT_MS = 1000L
+
+/**
+ * Fixed-1000ms long-press over a selector (chunk), independent of the user's configurable
+ * cell-level long-press ([boardInputGestures]'s `longPressTimeoutMs`/`onLongPress`, which drives
+ * flag-toggling). Only meaningful over a *solved* selector, but that check is left to the caller
+ * ([onLongPress] receives the resolved [ChunkCoord] plus the raw screen position so the caller can
+ * anchor a popup there): every cell in a solved chunk is already REVEALED/FLAGGED, so the existing
+ * cell-level long-press is already a no-op there and the two detectors never fight over one tap.
+ */
+private fun Modifier.boardSelectorLongPress(
+    viewportState: ViewportState,
+    enabled: Boolean,
+    onLongPress: (ChunkCoord, Offset) -> Unit,
+): Modifier = pointerInput(viewportState, enabled, onLongPress) {
+    if (!enabled) return@pointerInput
+    val slop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        val down = awaitFirstDown()
+        var cancelled = false
+        val timedOut = withTimeoutOrNull(SELECTOR_LONG_PRESS_TIMEOUT_MS) {
+            while (true) {
+                val event = awaitPointerEvent()
+                if (event.changes.size > 1) {
+                    cancelled = true
+                    return@withTimeoutOrNull
+                }
+                val change = event.changes.firstOrNull { it.id == down.id }
+                    ?: return@withTimeoutOrNull
+                if (exceedsTouchSlop(down.position, change.position, slop)) {
+                    cancelled = true
+                    return@withTimeoutOrNull
+                }
+                if (!change.pressed) return@withTimeoutOrNull
+            }
+        } == null
+        if (!cancelled && timedOut) {
+            val pixelsPerCell = (BoardDimens.BaseCellSizeDp.dp.toPx() * viewportState.zoom).toDouble()
+            val coord = resolveChunkCoord(
+                position = down.position,
+                canvasWidth = size.width.toFloat(),
+                canvasHeight = size.height.toFloat(),
+                viewportCenterX = viewportState.centerX,
+                viewportCenterY = viewportState.centerY,
+                pixelsPerCell = pixelsPerCell,
+            )
+            onLongPress(coord, down.position)
+            waitForUpOrCancellation()
+        }
+    }
+}
+
+/** Resolves the selector (chunk) under a screen [position], mirroring [boardInputGestures]'s
+ * cell-resolution math one level up (floor-div by [CHUNK_SIDE_LENGTH] instead of by 1). */
+internal fun resolveChunkCoord(
+    position: Offset,
+    canvasWidth: Float,
+    canvasHeight: Float,
+    viewportCenterX: Double,
+    viewportCenterY: Double,
+    pixelsPerCell: Double,
+): ChunkCoord {
+    val worldX = viewportCenterX + (position.x - canvasWidth / 2.0) / pixelsPerCell
+    val worldY = viewportCenterY + (position.y - canvasHeight / 2.0) / pixelsPerCell
+    return ChunkCoord(
+        cx = Math.floorDiv(floor(worldX).toLong(), CHUNK_SIDE_LENGTH.toLong())
+            .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt(),
+        cy = Math.floorDiv(floor(worldY).toLong(), CHUNK_SIDE_LENGTH.toLong())
+            .coerceIn(Int.MIN_VALUE.toLong(), Int.MAX_VALUE.toLong()).toInt(),
+    )
 }
 
 /** True when [current] has moved far enough from [start] to no longer count as a tap. */

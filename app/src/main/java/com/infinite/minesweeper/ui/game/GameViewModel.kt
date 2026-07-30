@@ -152,6 +152,12 @@ class GameViewModel @Inject constructor(
         }
     }
 
+    /** Resets an already-solved selector back to hidden with a fresh mine layout. */
+    fun resetSelector(coord: ChunkCoord) {
+        val activeEngine = engine ?: return
+        viewModelScope.launch { activeEngine.resetSolvedChunk(coord) }
+    }
+
     fun updateViewport(centerX: Double, centerY: Double, zoom: Double) {
         viewport.value = ViewportSnapshot(
             centerX = centerX.toFloat(),

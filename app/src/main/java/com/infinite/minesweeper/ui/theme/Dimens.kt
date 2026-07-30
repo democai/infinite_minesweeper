@@ -20,8 +20,14 @@ object BoardDimens {
     const val MinZoom: Float = 0.05f
     const val MaxZoom: Float = 4f
 
-    /** Fixed on-screen size of the decorative world-origin marker, independent of zoom. */
-    const val HomeMarkerSizeDp: Float = 24f
+    /**
+     * On-screen size of the decorative world-origin marker, expressed in board cells so it scales
+     * with zoom like every other board element. Clamped to [HomeMarkerMinSizeDp]/[HomeMarkerMaxSizeDp]
+     * so it stays a visible landmark at extreme zoom-out without growing unbounded.
+     */
+    const val HomeMarkerSizeCells: Float = 3f
+    const val HomeMarkerMinSizeDp: Float = 10f
+    const val HomeMarkerMaxSizeDp: Float = 48f
 
     /** Hairline between cells at full detail, in dp. */
     const val CellGridStrokeDp: Float = 1f

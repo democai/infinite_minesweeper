@@ -8,6 +8,10 @@ renderers consume immutable `GameState` snapshots.
 - `GameEngine.state` and `GameEngine.events` may be collected on the main thread.
 - `GameEngine.dispatch` is main-safe. Implementations must move mine generation, flood-fill, and
   other expensive work to a background dispatcher before doing it.
+- `DefaultGameEngine.resetSolvedChunk` (player-initiated reset of an already-solved selector, not
+  part of the `GameAction` sealed hierarchy since it's chunk-scoped rather than cell-scoped) is
+  main-safe the same way: it serializes with `dispatch`/`syncWindow` on the same mutex and moves
+  its mine reroll to the background dispatcher internally.
 - Every `ChunkRepository` function is main-safe. Its implementation owns database dispatcher
   switching. `saveChunk`, `saveChunks`, and `saveGameMeta` enqueue/coalesce writes; `flush` waits
   until all writes queued before the call are durable. `getLockedChunks` returns every
