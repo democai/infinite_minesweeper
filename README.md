@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="app/src/main/res/drawable-nodpi/ic_launcher_emblem.png" alt="Infinite Minesweeper icon" width="180">
+</p>
+
 # Infinite Minesweeper
 
 An infinite-board Minesweeper for Android (Kotlin, Jetpack Compose). Pure minesweeper, with no currency, boosters, or collectibles. Hitting a mine locks a selector instead of ending the game; clear its neighbors to recover once, then a second hit there wipes the selector and rerolls its interior.
