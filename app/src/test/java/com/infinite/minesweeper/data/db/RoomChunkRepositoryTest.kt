@@ -226,6 +226,37 @@ class RoomChunkRepositoryTest {
     }
 
     @Test
+    fun getAllChunks_mergesPendingOverDurableRows() = runTest {
+        val repository = newRepository()
+        val durable = sampleChunk(
+            coord = ChunkCoord(2, 2),
+            generated = true,
+            cellIndex = 0,
+            cell = Cell(state = CellState.REVEALED, adjacentMines = 1),
+        )
+        val other = sampleChunk(coord = ChunkCoord(3, 3), generated = true)
+        repository.saveChunks(listOf(durable, other))
+        repository.flush()
+
+        val pendingOverride = sampleChunk(
+            coord = ChunkCoord(2, 2),
+            generated = true,
+            cellIndex = 0,
+            cell = Cell(state = CellState.FLAGGED, isMine = true),
+        )
+        val pendingNew = sampleChunk(coord = ChunkCoord(4, 4), generated = true)
+        repository.saveChunks(listOf(pendingOverride, pendingNew))
+
+        val all = repository.getAllChunks()
+        assertEquals(3, all.size)
+        assertEquals(pendingOverride, all[ChunkCoord(2, 2)])
+        assertEquals(other, all[ChunkCoord(3, 3)])
+        assertEquals(pendingNew, all[ChunkCoord(4, 4)])
+        // Pending only — debounced write has not fired yet.
+        assertEquals(1, repository.chunkWriteBatchCount)
+    }
+
+    @Test
     fun lockedChunk_roundTripsStatusAndLockedAt() = runTest {
         val repository = newRepository()
         val chunk = sampleChunk(

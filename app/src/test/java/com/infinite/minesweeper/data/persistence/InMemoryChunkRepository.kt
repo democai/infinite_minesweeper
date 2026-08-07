@@ -31,6 +31,8 @@ class InMemoryChunkRepository(private val store: DurableStore = DurableStore()) 
     override suspend fun getLockedChunks(): Map<ChunkCoord, Chunk> =
         store.chunks.filterValues { it.status == ChunkStatus.LOCKED }
 
+    override suspend fun getAllChunks(): Map<ChunkCoord, Chunk> = store.chunks.toMap()
+
     override suspend fun saveChunk(chunk: Chunk) {
         store.chunks[chunk.coord] = chunk
         _saveChunksCalls += listOf(chunk)

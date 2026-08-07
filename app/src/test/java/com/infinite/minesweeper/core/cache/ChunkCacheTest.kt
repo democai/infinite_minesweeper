@@ -158,6 +158,8 @@ class ChunkCacheTest {
         override suspend fun getLockedChunks(): Map<ChunkCoord, Chunk> =
             persisted.filterValues { it.status == ChunkStatus.LOCKED }
 
+        override suspend fun getAllChunks(): Map<ChunkCoord, Chunk> = persisted.toMap()
+
         override suspend fun saveChunk(chunk: Chunk) {
             events += "save:${chunk.coord.cx},${chunk.coord.cy}"
             persisted[chunk.coord] = chunk

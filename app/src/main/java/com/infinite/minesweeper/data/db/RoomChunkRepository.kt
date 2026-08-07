@@ -105,6 +105,20 @@ class RoomChunkRepository(
         return fromPending + fromDb
     }
 
+    override suspend fun getAllChunks(): Map<ChunkCoord, Chunk> {
+        val fromPending = queueMutex.withLock {
+            pendingChunks.toMap()
+        }
+        val fromDb = withContext(ioDispatcher) {
+            chunkDao.getAll()
+                .asSequence()
+                .map(ChunkMapper::toDomain)
+                .filter { it.coord !in fromPending }
+                .associateBy { it.coord }
+        }
+        return fromPending + fromDb
+    }
+
     override suspend fun saveChunk(chunk: Chunk) {
         queueMutex.withLock {
             pendingChunks[chunk.coord] = chunk

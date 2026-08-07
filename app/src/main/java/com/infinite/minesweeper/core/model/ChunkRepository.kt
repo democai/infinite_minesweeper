@@ -12,6 +12,12 @@ interface ChunkRepository {
     suspend fun getLockedChunks(): Map<ChunkCoord, Chunk>
 
     /**
+     * Every durable chunk, with pending write-behind entries taking precedence. Used by save
+     * export; not for normal gameplay hydration (see cold-start viewport windowing).
+     */
+    suspend fun getAllChunks(): Map<ChunkCoord, Chunk>
+
+    /**
      * Adds or replaces a chunk in the repository's write-behind queue.
      */
     suspend fun saveChunk(chunk: Chunk)

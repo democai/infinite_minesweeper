@@ -8,14 +8,17 @@ import com.infinite.minesweeper.core.engine.DefaultGameEngine
 import com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic
 import com.infinite.minesweeper.core.engine.lock.neighboringChunkCoords
 import com.infinite.minesweeper.core.generation.SeededMineGenerator
+import com.infinite.minesweeper.core.generation.WORLD_SEED
 import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkRepository
 import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameEvent
+import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
 import com.infinite.minesweeper.data.persistence.GamePersistenceCoordinator
+import com.infinite.minesweeper.data.persistence.GameSaveCodec
 import com.infinite.minesweeper.data.persistence.ViewportSnapshot
 import com.infinite.minesweeper.data.persistence.restoreGameState
 import com.infinite.minesweeper.ui.settings.InputActionMapper
@@ -41,8 +44,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-private const val WORLD_SEED = 0x49_4E_46_4D_49_4E_45L
-
 @HiltViewModel
 class GameViewModel @Inject constructor(
     private val repository: ChunkRepository,
@@ -54,6 +55,9 @@ class GameViewModel @Inject constructor(
     private val _events = MutableSharedFlow<GameEvent>(extraBufferCapacity = 32)
     val events: SharedFlow<GameEvent> = _events.asSharedFlow()
 
+    private val _saveTransferMessages = MutableSharedFlow<SaveTransferMessage>(extraBufferCapacity = 8)
+    val saveTransferMessages: SharedFlow<SaveTransferMessage> = _saveTransferMessages.asSharedFlow()
+
     private val viewport = MutableStateFlow(ViewportSnapshot(0f, 0f, 1f))
     private var engine: DefaultGameEngine? = null
     private var persistence: GamePersistenceCoordinator? = null
@@ -61,7 +65,8 @@ class GameViewModel @Inject constructor(
     private val flushMutex = Mutex()
 
     /** Tracks the current session's engine-state/events collectors and persistence coordinator,
-     * so [resetGame] can stop exactly those (and only those) before wiping durable storage. */
+     * so [resetGame] / [importSave] can stop exactly those (and only those) before wiping durable
+     * storage. */
     private var sessionJob: Job? = null
 
     init {
@@ -127,6 +132,59 @@ class GameViewModel @Inject constructor(
                 withContext(NonCancellable) { repository.clearAll() }
                 startSession(fresh = true)
             }
+        }
+    }
+
+    /**
+     * Flushes the live working set, then returns a portable `.imsave` payload of every durable
+     * chunk plus game meta.
+     */
+    suspend fun exportSave(): ByteArray = flushMutex.withLock {
+        withContext(NonCancellable) {
+            persistLiveWorkingSet()
+            val meta = repository.getGameMeta() ?: GameMeta()
+            val chunks = repository.getAllChunks()
+            GameSaveCodec.encode(
+                GameSaveCodec.Snapshot(
+                    worldSeed = WORLD_SEED,
+                    meta = meta,
+                    chunks = chunks,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Replaces durable storage with a decoded save and restores a session from it (same hydrate
+     * path as cold start). Fails fast without mutating storage when the payload is invalid.
+     */
+    suspend fun importSave(bytes: ByteArray) {
+        val snapshot = GameSaveCodec.decode(bytes)
+        flushMutex.withLock {
+            sessionJob?.cancelAndJoin()
+            engine = null
+            persistence = null
+            withContext(NonCancellable) {
+                repository.clearAll()
+                if (snapshot.chunks.isNotEmpty()) {
+                    repository.saveChunks(snapshot.chunks.values)
+                }
+                repository.saveGameMeta(snapshot.meta)
+                repository.flush()
+            }
+            startSession(fresh = false)
+        }
+    }
+
+    fun reportSaveTransferSuccess(message: String) {
+        viewModelScope.launch {
+            _saveTransferMessages.emit(SaveTransferMessage.Success(message))
+        }
+    }
+
+    fun reportSaveTransferFailure(message: String) {
+        viewModelScope.launch {
+            _saveTransferMessages.emit(SaveTransferMessage.Failure(message))
         }
     }
 
@@ -224,18 +282,30 @@ class GameViewModel @Inject constructor(
     suspend fun flushNow() {
         flushMutex.withLock {
             withContext(NonCancellable) {
-                val snapshot = _state.value
-                val viewportSnapshot = viewport.value
-                repository.saveChunks(snapshot.chunks.values)
-                repository.saveGameMeta(
-                    snapshot.meta.copy(
-                        viewportX = viewportSnapshot.centerX,
-                        viewportY = viewportSnapshot.centerY,
-                        zoom = viewportSnapshot.zoom,
-                    ),
-                )
-                repository.flush()
+                persistLiveWorkingSet()
             }
         }
     }
+
+    private suspend fun persistLiveWorkingSet() {
+        val snapshot = _state.value
+        val viewportSnapshot = viewport.value
+        repository.saveChunks(snapshot.chunks.values)
+        repository.saveGameMeta(
+            snapshot.meta.copy(
+                viewportX = viewportSnapshot.centerX,
+                viewportY = viewportSnapshot.centerY,
+                zoom = viewportSnapshot.zoom,
+            ),
+        )
+        repository.flush()
+    }
+}
+
+/** One-shot feedback for Settings export/import (success or failure text). */
+sealed interface SaveTransferMessage {
+    val text: String
+
+    data class Success(override val text: String) : SaveTransferMessage
+    data class Failure(override val text: String) : SaveTransferMessage
 }

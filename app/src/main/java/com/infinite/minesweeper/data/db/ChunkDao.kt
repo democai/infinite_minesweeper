@@ -25,6 +25,9 @@ interface ChunkDao {
     @Query("SELECT * FROM chunks WHERE status = :status")
     suspend fun getChunksByStatus(status: ChunkStatus): List<ChunkEntity>
 
+    @Query("SELECT * FROM chunks")
+    suspend fun getAll(): List<ChunkEntity>
+
     @Upsert
     suspend fun upsert(chunk: ChunkEntity)
 

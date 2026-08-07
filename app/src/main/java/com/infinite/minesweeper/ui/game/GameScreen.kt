@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
@@ -130,6 +131,25 @@ fun GameScreen(
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
+    var transferDialog by remember { mutableStateOf<Pair<String, Boolean>?>(null) }
+    LaunchedEffect(viewModel) {
+        viewModel.saveTransferMessages.collect { message ->
+            transferDialog = message.text to (message is SaveTransferMessage.Failure)
+        }
+    }
+    transferDialog?.let { (text, isError) ->
+        AlertDialog(
+            onDismissRequest = { transferDialog = null },
+            title = { Text(if (isError) "Save transfer failed" else "Save transfer") },
+            text = { Text(text) },
+            confirmButton = {
+                TextButton(onClick = { transferDialog = null }) {
+                    Text("OK", color = BoardPalette.AccentGold)
+                }
+            },
+        )
+    }
+
     if (showSettings) {
         Column(
             modifier = modifier
@@ -146,6 +166,19 @@ fun GameScreen(
                     viewModel.resetGame()
                     viewportRestored = false
                     showSettings = false
+                },
+                onExportSave = { viewModel.exportSave() },
+                onImportSave = { bytes -> viewModel.importSave(bytes) },
+                onImportApplied = {
+                    viewportRestored = false
+                    showSettings = false
+                },
+                onTransferMessage = { text, isError ->
+                    if (isError) {
+                        viewModel.reportSaveTransferFailure(text)
+                    } else {
+                        viewModel.reportSaveTransferSuccess(text)
+                    }
                 },
                 modifier = Modifier.weight(1f),
             )

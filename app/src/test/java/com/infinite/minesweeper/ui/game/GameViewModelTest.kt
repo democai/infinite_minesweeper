@@ -10,6 +10,8 @@ import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
+import com.infinite.minesweeper.core.generation.WORLD_SEED
+import com.infinite.minesweeper.data.persistence.GameSaveCodec
 import com.infinite.minesweeper.data.persistence.InMemoryChunkRepository
 import com.infinite.minesweeper.ui.settings.InputBindingPreferences
 import com.infinite.minesweeper.ui.settings.TapKind
@@ -177,6 +179,155 @@ class GameViewModelTest {
         // The new session's persistence coordinator writes back a fresh default GameMeta on its
         // first tick — the durable state must reflect a wiped board, not merely be null.
         assertEquals(GameMeta(), store.meta)
+
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun exportSave_includesFlushedLiveAndRepositoryChunks() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+
+        val repository = InMemoryChunkRepository()
+        val farCoord = ChunkCoord(40, 40)
+        val farChunk = Chunk(
+            coord = farCoord,
+            generated = true,
+            cells = List(64) { index ->
+                if (index == 0) Cell(state = CellState.REVEALED, adjacentMines = 3) else Cell()
+            },
+        )
+        repository.saveChunk(farChunk)
+        repository.saveGameMeta(
+            GameMeta(
+                flagsPlaced = 4,
+                viewportX = 5f,
+                viewportY = -2f,
+                zoom = 2f,
+                hasEverRevealed = true,
+            ),
+        )
+
+        val viewModel = GameViewModel(repository, inputBindingPreferences())
+        advanceUntilIdle()
+
+        val bytes = viewModel.exportSave()
+        val snapshot = GameSaveCodec.decode(bytes)
+
+        assertTrue(snapshot.chunks.containsKey(farCoord))
+        assertEquals(farChunk, snapshot.chunks.getValue(farCoord))
+        assertEquals(4, snapshot.meta.flagsPlaced)
+        assertEquals(5f, snapshot.meta.viewportX)
+        assertEquals(-2f, snapshot.meta.viewportY)
+        assertEquals(2f, snapshot.meta.zoom)
+
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun importSave_replacesDurableStateAndRestoresSession() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+
+        val store = InMemoryChunkRepository.DurableStore()
+        val repository = InMemoryChunkRepository(store)
+        val oldCoord = ChunkCoord(1, 1)
+        repository.saveChunk(
+            Chunk(
+                coord = oldCoord,
+                generated = true,
+                cells = List(64) { index ->
+                    if (index == 0) Cell(state = CellState.REVEALED) else Cell()
+                },
+            ),
+        )
+        repository.saveGameMeta(GameMeta(flagsPlaced = 9, hasEverRevealed = true))
+
+        val viewModel = GameViewModel(repository, inputBindingPreferences())
+        advanceUntilIdle()
+        assertTrue(viewModel.state.value.chunks.containsKey(oldCoord))
+
+        val importedCoord = ChunkCoord(0, 0)
+        val importedChunk = Chunk(
+            coord = importedCoord,
+            generated = true,
+            cells = List(64) { index ->
+                if (index == 1) Cell(state = CellState.FLAGGED, isMine = true) else Cell()
+            },
+        )
+        val importedMeta = GameMeta(
+            flagsPlaced = 2,
+            selectorsCleared = 1,
+            viewportX = 12f,
+            viewportY = 8f,
+            zoom = 1.5f,
+            hasEverRevealed = true,
+            hasExploredBounds = true,
+            exploredMinCx = 0,
+            exploredMaxCx = 0,
+            exploredMinCy = 0,
+            exploredMaxCy = 0,
+        )
+        val payload = GameSaveCodec.encode(
+            GameSaveCodec.Snapshot(
+                worldSeed = WORLD_SEED,
+                meta = importedMeta,
+                chunks = mapOf(importedCoord to importedChunk),
+            ),
+        )
+
+        viewModel.importSave(payload)
+        advanceUntilIdle()
+
+        assertEquals(importedChunk, store.chunks[importedCoord])
+        assertFalse(store.chunks.containsKey(oldCoord))
+        assertEquals(importedMeta, store.meta)
+        assertTrue(viewModel.state.value.chunks.containsKey(importedCoord))
+        assertEquals(importedMeta.flagsPlaced, viewModel.state.value.meta.flagsPlaced)
+        assertEquals(importedMeta.viewportX, viewModel.state.value.meta.viewportX)
+        assertEquals(importedMeta.zoom, viewModel.state.value.meta.zoom)
+
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+    }
+
+    @Test
+    fun importSave_rejectsInvalidPayloadWithoutWipingCurrentSave() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+
+        val store = InMemoryChunkRepository.DurableStore()
+        val repository = InMemoryChunkRepository(store)
+        val keepCoord = ChunkCoord(1, 1)
+        val keepChunk = Chunk(
+            coord = keepCoord,
+            generated = true,
+            cells = List(64) { index -> if (index == 0) Cell(state = CellState.REVEALED) else Cell() },
+        )
+        repository.saveChunk(keepChunk)
+        repository.saveGameMeta(GameMeta(flagsPlaced = 3, hasEverRevealed = true))
+
+        val viewModel = GameViewModel(repository, inputBindingPreferences())
+        advanceUntilIdle()
+
+        // Capture post-restore durable truth (cold start may repair adjacency numbers).
+        val durableAfterStart = store.chunks.getValue(keepCoord)
+        val metaAfterStart = store.meta
+
+        var threw = false
+        try {
+            viewModel.importSave(byteArrayOf(1, 2, 3, 4))
+        } catch (_: Exception) {
+            threw = true
+        }
+        advanceUntilIdle()
+        assertTrue(threw)
+        assertEquals(durableAfterStart, store.chunks[keepCoord])
+        assertEquals(metaAfterStart, store.meta)
+        assertTrue(viewModel.state.value.chunks.containsKey(keepCoord))
+        assertEquals(3, viewModel.state.value.meta.flagsPlaced)
 
         viewModel.viewModelScope.cancel()
         advanceUntilIdle()

@@ -15,7 +15,9 @@ renderers consume immutable `GameState` snapshots.
 - Every `ChunkRepository` function is main-safe. Its implementation owns database dispatcher
   switching. `saveChunk`, `saveChunks`, and `saveGameMeta` enqueue/coalesce writes; `flush` waits
   until all writes queued before the call are durable. `getLockedChunks` returns every
-  currently-locked selector for cold-start surround rechecks.
+  currently-locked selector for cold-start surround rechecks. `getAllChunks` returns every
+  durable chunk (pending queue merged over storage) for export; gameplay still hydrates only
+  the viewport window via `getChunks` / cold-start restore.
 - `MineGenerator.mineDensityFor` is a small, pure calculation and is main-safe.
 - `MineGenerator.generateForFirstTouch`, `MineGenerator.ensureNeighborsGenerated`, and
   `MineGenerator.reroll` are background-only. The engine is responsible for calling them from a
