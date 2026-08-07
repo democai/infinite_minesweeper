@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -30,6 +32,9 @@ val apkVersionCode =
         check(it > 0) { "Clock before version epoch; cannot compute versionCode ($it)" }
     }
 val apkVersionName = "0.1.${gitStdout("rev-list", "--count", "HEAD")}+${gitStdout("rev-parse", "--short", "HEAD")}"
+val releaseSigning = Properties().apply {
+    file("/cursor-agent/home/.android-signing/democ-release.properties").inputStream().use(::load)
+}
 
 android {
     namespace = "com.infinite.minesweeper"
@@ -45,11 +50,18 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file(releaseSigning.getProperty("storeFile"))
+            storePassword = releaseSigning.getProperty("storePassword")
+            keyAlias = releaseSigning.getProperty("keyAlias")
+            keyPassword = releaseSigning.getProperty("keyPassword")
+        }
+    }
+
     buildTypes {
         release {
-            // No dedicated release keystore yet — sign with the debug key so
-            // `just apk` / assembleRelease produces a sideloadable package.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
