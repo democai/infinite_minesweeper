@@ -35,8 +35,10 @@ interface MineGenerator {
     ): GenerationResult
 
     /**
-     * Wipes and re-rolls [coord], returning it plus all neighboring chunks whose one-cell border
-     * changed. The generator's configured seed makes equivalent requests deterministic.
+     * Wipes and re-rolls [coord], returning it plus any neighboring chunks whose adjacency needed
+     * repair. An existing generated chunk keeps the mine positions on its one-cell perimeter, so
+     * valid clues in neighboring chunks stay fixed; only its 6x6 interior receives a fresh
+     * deterministic roll. A missing or ungenerated chunk receives a full deterministic roll.
      */
     suspend fun reroll(
         coord: ChunkCoord,

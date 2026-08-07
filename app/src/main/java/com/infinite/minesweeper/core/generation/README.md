@@ -9,4 +9,6 @@ so most selectors are easy / intermediate and hard ones are rare spice (no dista
 `ensureNeighborsGenerated` rolls missing neighbors of a playable chunk (empty exclusion) so border
 numbers are final before cells are revealed. `recomputeAdjacency` calculates numbers across chunk
 boundaries and is also used to patch already-generated neighbors when the generated frontier
-expands or a chunk is re-rolled.
+expands or a chunk is re-rolled. Rerolling a generated selector keeps the mines on its 28-cell
+perimeter and rolls only the 6×6 interior. Neighboring clues therefore stay fixed while the
+selector receives a new interior layout.

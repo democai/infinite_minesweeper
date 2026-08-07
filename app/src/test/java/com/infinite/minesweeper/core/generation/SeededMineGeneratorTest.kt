@@ -147,13 +147,18 @@ class SeededMineGeneratorTest {
     fun rerollIsDeterministicAndPatchesNeighborBorder() = runTest {
         val generator = SeededMineGenerator(seed = 999L)
         val known = generator.generateForFirstTouch(CellCoord(0, 0), emptyMap()).chunks
+        val center = ChunkCoord(0, 0)
+        val before = known.getValue(center)
+        val neighborCluesBefore = known
+            .filterKeys { it != center }
+            .mapValues { (_, chunk) -> chunk.cells.map(Cell::adjacentMines) }
 
-        val first = generator.reroll(ChunkCoord(0, 0), known)
-        val second = generator.reroll(ChunkCoord(0, 0), known)
+        val first = generator.reroll(center, known)
+        val second = generator.reroll(center, known)
 
         assertEquals(first, second)
         assertTrue(
-            first.chunks.getValue(ChunkCoord(0, 0)).cells.all {
+            first.chunks.getValue(center).cells.all {
                 it.state == CellState.HIDDEN
             },
         )
@@ -161,6 +166,53 @@ class SeededMineGeneratorTest {
         assertEquals(
             recomputeAdjacency(merged).filterKeys { it in first.chunks },
             first.chunks,
+        )
+
+        val after = merged.getValue(center)
+        for (index in before.cells.indices) {
+            val x = index % 8
+            val y = index / 8
+            if (x == 0 || x == 7 || y == 0 || y == 7) {
+                assertEquals(
+                    "Perimeter mine changed at ($x,$y)",
+                    before.cells[index].isMine,
+                    after.cells[index].isMine,
+                )
+            }
+        }
+        assertTrue(
+            "Fixture seed must produce a different 6x6 interior",
+            before.cells.indices.any { index ->
+                val x = index % 8
+                val y = index / 8
+                x in 1..6 && y in 1..6 &&
+                    before.cells[index].isMine != after.cells[index].isMine
+            },
+        )
+        for ((coord, clues) in neighborCluesBefore) {
+            assertEquals(
+                "Neighbor clues changed in $coord",
+                clues,
+                merged.getValue(coord).cells.map(Cell::adjacentMines),
+            )
+        }
+    }
+
+    @Test
+    fun rerollOfMissingChunkRollsTheFullSelector() = runTest {
+        val center = ChunkCoord(0, 0)
+        val rerolled = SeededMineGenerator(seed = 999L)
+            .reroll(center, emptyMap())
+            .chunks
+            .getValue(center)
+
+        assertTrue(
+            "A missing chunk must not inherit an empty perimeter",
+            rerolled.cells.indices.any { index ->
+                val x = index % 8
+                val y = index / 8
+                (x == 0 || x == 7 || y == 0 || y == 7) && rerolled.cells[index].isMine
+            },
         )
     }
 

@@ -37,6 +37,7 @@ import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.ui.board.BoardEffect
 import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
+import com.infinite.minesweeper.ui.board.computeMinZoomFromExploredBounds
 import com.infinite.minesweeper.ui.board.rememberViewportState
 import com.infinite.minesweeper.ui.hud.GameHud
 import com.infinite.minesweeper.ui.settings.LongPressDuration
@@ -78,8 +79,8 @@ fun GameScreen(
     }
 
     val density = LocalDensity.current
-    LaunchedEffect(viewportState, density) {
-        val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
+    val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
+    LaunchedEffect(viewportState, baseCellSizePx) {
         snapshotFlow {
             viewportState.visibleChunkBounds(
                 baseCellSizePx = baseCellSizePx,
@@ -90,6 +91,32 @@ fun GameScreen(
             .map { it.toSet() }
             .distinctUntilChanged()
             .collect { window -> viewModel.syncVisibleWindow(window) }
+    }
+    val viewportWidthPx = viewportState.viewportWidthPx
+    val viewportHeightPx = viewportState.viewportHeightPx
+    val meta = state.meta
+    LaunchedEffect(
+        viewportWidthPx,
+        viewportHeightPx,
+        baseCellSizePx,
+        meta.hasExploredBounds,
+        meta.exploredMinCx,
+        meta.exploredMaxCx,
+        meta.exploredMinCy,
+        meta.exploredMaxCy,
+    ) {
+        viewportState.updateMinZoom(
+            computeMinZoomFromExploredBounds(
+                viewportWidthPx = viewportWidthPx,
+                viewportHeightPx = viewportHeightPx,
+                baseCellSizePx = baseCellSizePx,
+                hasExploredBounds = meta.hasExploredBounds,
+                exploredMinCx = meta.exploredMinCx,
+                exploredMaxCx = meta.exploredMaxCx,
+                exploredMinCy = meta.exploredMinCy,
+                exploredMaxCy = meta.exploredMaxCy,
+            ),
+        )
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current

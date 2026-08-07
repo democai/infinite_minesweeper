@@ -17,6 +17,16 @@ data class GameMeta(
      * live window. Gates the one-time adjacency-rule bootstrap exemption in `DefaultGameEngine`.
      */
     val hasEverRevealed: Boolean = false,
+    /**
+     * Axis-aligned bounding box of every selector ever present in the working set or restored
+     * from storage. Durable so zoom-out can grow with explored extent even after viewport
+     * eviction has trimmed [GameState.chunks].
+     */
+    val hasExploredBounds: Boolean = false,
+    val exploredMinCx: Int = 0,
+    val exploredMaxCx: Int = 0,
+    val exploredMinCy: Int = 0,
+    val exploredMaxCy: Int = 0,
 ) {
     init {
         require(flagsPlaced >= 0) { "flagsPlaced cannot be negative" }
@@ -25,6 +35,33 @@ data class GameMeta(
         require(viewportX.isFinite()) { "viewportX must be finite" }
         require(viewportY.isFinite()) { "viewportY must be finite" }
         require(zoom.isFinite() && zoom > 0f) { "zoom must be finite and greater than zero" }
+        if (hasExploredBounds) {
+            require(exploredMinCx <= exploredMaxCx) {
+                "exploredMinCx must not exceed exploredMaxCx"
+            }
+            require(exploredMinCy <= exploredMaxCy) {
+                "exploredMinCy must not exceed exploredMaxCy"
+            }
+        }
+    }
+
+    /** Expands the explored AABB to include [coord], or seeds it when bounds were empty. */
+    fun expandExplored(coord: ChunkCoord): GameMeta {
+        if (!hasExploredBounds) {
+            return copy(
+                hasExploredBounds = true,
+                exploredMinCx = coord.cx,
+                exploredMaxCx = coord.cx,
+                exploredMinCy = coord.cy,
+                exploredMaxCy = coord.cy,
+            )
+        }
+        return copy(
+            exploredMinCx = minOf(exploredMinCx, coord.cx),
+            exploredMaxCx = maxOf(exploredMaxCx, coord.cx),
+            exploredMinCy = minOf(exploredMinCy, coord.cy),
+            exploredMaxCy = maxOf(exploredMaxCy, coord.cy),
+        )
     }
 }
 

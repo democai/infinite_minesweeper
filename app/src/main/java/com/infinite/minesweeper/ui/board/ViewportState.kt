@@ -31,7 +31,7 @@ class ViewportState(
     initialCenterX: Double = 0.0,
     initialCenterY: Double = 0.0,
     initialZoom: Double = 1.0,
-    val minZoom: Double = BoardDimens.MinZoom.toDouble(),
+    minZoom: Double = BoardDimens.MinZoom.toDouble(),
     val maxZoom: Double = BoardDimens.MaxZoom.toDouble(),
 ) {
     var centerX by mutableDoubleStateOf(initialCenterX)
@@ -39,6 +39,9 @@ class ViewportState(
 
     var centerY by mutableDoubleStateOf(initialCenterY)
         private set
+
+    private var minZoomState by mutableDoubleStateOf(minZoom)
+    val minZoom: Double get() = minZoomState
 
     var zoom by mutableDoubleStateOf(initialZoom.coerceIn(minZoom, maxZoom))
         private set
@@ -74,6 +77,19 @@ class ViewportState(
         viewportHeightPx = heightPx
     }
 
+    /**
+     * Updates the zoom-out floor and re-clamps the current zoom into the new range.
+     * Used when explored selector extent unlocks further zoom-out.
+     */
+    fun updateMinZoom(value: Double) {
+        require(value.isFinite() && value > 0.0) {
+            "minZoom must be finite and greater than zero"
+        }
+        require(value <= maxZoom) { "minZoom must not exceed maxZoom" }
+        minZoomState = value
+        zoom = zoom.coerceIn(minZoomState, maxZoom)
+    }
+
     fun moveTo(centerX: Double, centerY: Double, zoom: Double = this.zoom) {
         require(centerX.isFinite()) { "centerX must be finite" }
         require(centerY.isFinite()) { "centerY must be finite" }
@@ -82,7 +98,7 @@ class ViewportState(
         }
         this.centerX = centerX
         this.centerY = centerY
-        this.zoom = zoom.coerceIn(minZoom, maxZoom)
+        this.zoom = zoom.coerceIn(minZoomState, maxZoom)
     }
 
     /**
@@ -109,7 +125,7 @@ class ViewportState(
         require(baseCellSizePx > 0.0) { "baseCellSizePx must be greater than zero" }
 
         val oldPixelsPerCell = baseCellSizePx * zoom
-        val newZoom = (zoom * zoomChange).coerceIn(minZoom, maxZoom)
+        val newZoom = (zoom * zoomChange).coerceIn(minZoomState, maxZoom)
         val newPixelsPerCell = baseCellSizePx * newZoom
         val screenCenterX = viewportWidthPx / 2.0
         val screenCenterY = viewportHeightPx / 2.0
@@ -218,6 +234,60 @@ fun calculateVisibleChunkBounds(
             .coerceAtMost(Int.MAX_VALUE.toLong())
             .toInt(),
     )
+}
+
+/**
+ * Zoom-out floor from the explored selector AABB and current viewport pixel size.
+ *
+ * Uses [BoardDimens.MinZoom] as the baseline; when the span of explored selectors is large enough
+ * that fitting it requires zooming out further, the floor drops down to [BoardDimens.AbsoluteMinZoom].
+ */
+fun computeMinZoomFromExploredBounds(
+    viewportWidthPx: Double,
+    viewportHeightPx: Double,
+    baseCellSizePx: Double,
+    hasExploredBounds: Boolean,
+    exploredMinCx: Int = 0,
+    exploredMaxCx: Int = 0,
+    exploredMinCy: Int = 0,
+    exploredMaxCy: Int = 0,
+    baselineMinZoom: Double = BoardDimens.MinZoom.toDouble(),
+    absoluteMinZoom: Double = BoardDimens.AbsoluteMinZoom.toDouble(),
+): Double {
+    require(viewportWidthPx.isFinite() && viewportWidthPx >= 0.0) {
+        "viewportWidthPx must be finite and non-negative"
+    }
+    require(viewportHeightPx.isFinite() && viewportHeightPx >= 0.0) {
+        "viewportHeightPx must be finite and non-negative"
+    }
+    require(baseCellSizePx.isFinite() && baseCellSizePx > 0.0) {
+        "baseCellSizePx must be finite and greater than zero"
+    }
+    require(baselineMinZoom.isFinite() && baselineMinZoom > 0.0) {
+        "baselineMinZoom must be finite and greater than zero"
+    }
+    require(absoluteMinZoom.isFinite() && absoluteMinZoom > 0.0) {
+        "absoluteMinZoom must be finite and greater than zero"
+    }
+    require(absoluteMinZoom <= baselineMinZoom) {
+        "absoluteMinZoom must not exceed baselineMinZoom"
+    }
+    if (viewportWidthPx == 0.0 || viewportHeightPx == 0.0) return baselineMinZoom
+
+    val spanW = if (hasExploredBounds) {
+        (exploredMaxCx.toLong() - exploredMinCx.toLong() + 1L).coerceAtLeast(1L)
+    } else {
+        1L
+    }
+    val spanH = if (hasExploredBounds) {
+        (exploredMaxCy.toLong() - exploredMinCy.toLong() + 1L).coerceAtLeast(1L)
+    } else {
+        1L
+    }
+    val fitZoomW = viewportWidthPx / (baseCellSizePx * spanW * CHUNK_SIDE_LENGTH)
+    val fitZoomH = viewportHeightPx / (baseCellSizePx * spanH * CHUNK_SIDE_LENGTH)
+    val fitZoom = minOf(fitZoomW, fitZoomH)
+    return minOf(baselineMinZoom, fitZoom).coerceAtLeast(absoluteMinZoom)
 }
 
 @Composable

@@ -36,14 +36,16 @@ import com.infinite.minesweeper.ui.theme.HudTypography
 import kotlinx.coroutines.launch
 
 /**
- * Settings screen: tap/long-press binding plus long-press duration.
+ * Settings screen: input binding, long-press duration, and cascade behavior.
  */
 @Composable
 fun SettingsScreen(
     binding: InputBinding,
     longPressDuration: LongPressDuration,
+    limitCascadeToSelector: Boolean,
     onBindingChange: (InputBinding) -> Unit,
     onLongPressDurationChange: (LongPressDuration) -> Unit,
+    onLimitCascadeToSelectorChange: (Boolean) -> Unit,
     onResetGame: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -80,6 +82,28 @@ fun SettingsScreen(
                             },
                         )
                     },
+                    colors = SwitchDefaults.colors(checkedTrackColor = BoardPalette.AccentGold),
+                )
+            }
+
+            Spacer(modifier = Modifier.height(28.dp))
+            Text(
+                text = "Zero cascade",
+                style = HudTypography.labelMedium,
+                color = BoardPalette.OnSurface,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "Limit 0-cascade to current selector",
+                    style = HudTypography.labelMedium,
+                    color = BoardPalette.OnSurface,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(16.dp))
+                Switch(
+                    checked = limitCascadeToSelector,
+                    onCheckedChange = onLimitCascadeToSelectorChange,
                     colors = SwitchDefaults.colors(checkedTrackColor = BoardPalette.AccentGold),
                 )
             }
@@ -176,12 +200,17 @@ fun SettingsRoute(
     val longPressDuration by preferences.longPressDuration.collectAsState(
         initial = LongPressDuration.Default,
     )
+    val limitCascadeToSelector by preferences.limitCascadeToSelector.collectAsState(initial = false)
     SettingsScreen(
         binding = binding,
         longPressDuration = longPressDuration,
+        limitCascadeToSelector = limitCascadeToSelector,
         onBindingChange = { updated -> scope.launch { preferences.setBinding(updated) } },
         onLongPressDurationChange = { updated ->
             scope.launch { preferences.setLongPressDuration(updated) }
+        },
+        onLimitCascadeToSelectorChange = { enabled ->
+            scope.launch { preferences.setLimitCascadeToSelector(enabled) }
         },
         onResetGame = onResetGame,
         modifier = modifier,

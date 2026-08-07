@@ -60,11 +60,18 @@ class DefaultGameEngine(
 
     private val dispatchMutex = Mutex()
 
-    private val _state = MutableStateFlow(initialState)
+    private val _state = MutableStateFlow(seedExploredBounds(initialState))
     override val state: StateFlow<GameState> = _state.asStateFlow()
 
     private val _events = MutableSharedFlow<GameEvent>(extraBufferCapacity = EVENT_BUFFER_CAPACITY)
     override val events: SharedFlow<GameEvent> = _events.asSharedFlow()
+
+    /**
+     * When true, 0-cascade stops at the start cell's selector boundary. Runtime-updatable so the
+     * settings preference can flip without recreating the engine session.
+     */
+    @Volatile
+    var limitCascadeToSelector: Boolean = false
 
     /**
      * Bounds the live [state] chunk map to [keep], folding in [hydrated] for any newly retained
@@ -83,7 +90,14 @@ class DefaultGameEngine(
         dispatchMutex.withLock {
             val current = _state.value
             val trimmed = current.chunks.filterKeys { it in keep }
-            var next = current.copy(chunks = trimmed + hydrated)
+            var meta = current.meta
+            for (coord in hydrated.keys) {
+                meta = meta.expandExplored(coord)
+            }
+            for (coord in trimmed.keys) {
+                meta = meta.expandExplored(coord)
+            }
+            var next = current.copy(chunks = trimmed + hydrated, meta = meta)
             // Heal old saves / hydrated frontiers whose revealed cells still lack outer-ring
             // neighbors (provisional adjacency counted missing chunks as zero mines).
             next = repairRevealedNeighborhoods(next)
@@ -107,6 +121,7 @@ class DefaultGameEngine(
      */
     private suspend fun repairRevealedNeighborhoods(state: GameState): GameState {
         val chunks = state.chunks.toMutableMap()
+        var meta = state.meta
         var changed = false
         for (chunk in state.chunks.values) {
             if (!chunk.hasExploredCells()) continue
@@ -117,6 +132,7 @@ class DefaultGameEngine(
                 for ((loadedCoord, loaded) in loadChunks(missing)) {
                     if (loaded.generated && chunks[loadedCoord]?.generated != true) {
                         chunks[loadedCoord] = loaded
+                        meta = meta.expandExplored(loadedCoord)
                         changed = true
                     }
                 }
@@ -124,10 +140,13 @@ class DefaultGameEngine(
             val result = mineGenerator.ensureNeighborsGenerated(chunk.coord, chunks)
             if (result.chunks.isNotEmpty()) {
                 chunks.putAll(result.chunks)
+                for (coord in result.chunks.keys) {
+                    meta = meta.expandExplored(coord)
+                }
                 changed = true
             }
         }
-        return if (changed) state.copy(chunks = chunks) else state
+        return if (changed) state.copy(chunks = chunks, meta = meta) else state
     }
 
     override suspend fun dispatch(action: GameAction) {
@@ -140,6 +159,7 @@ class DefaultGameEngine(
                     meta = snapshot.meta,
                     mineGenerator = mineGenerator,
                     cascadeRadiusChunks = cascadeRadiusChunks,
+                    limitCascadeToSelector = limitCascadeToSelector,
                     batchSize = batchSize,
                     clock = clock,
                     loadChunks = loadChunks,
@@ -178,10 +198,10 @@ class DefaultGameEngine(
     }
 
     /**
-     * Player-initiated reset of an already-solved selector: rerolls its mines and returns every
-     * cell to hidden, mirroring [LockAndWipeMechanic]'s hard wipe exactly, except it does not
-     * increment [GameMeta.selectorsWiped] — that counter tracks mine-triggered hard wipes (an
-     * adverse event), whereas this is a deliberate, successful action the player chose to take.
+     * Player-initiated reset of an already-solved selector: preserves its mine perimeter, rerolls
+     * its 6x6 interior, and returns every cell to hidden. This mirrors [LockAndWipeMechanic]'s hard
+     * wipe except it does not increment [GameMeta.selectorsWiped], which tracks mine-triggered
+     * hard wipes rather than deliberate resets.
      * No-ops if the chunk is missing or not [Chunk.isSolved] (e.g. a stale UI request racing a
      * state change).
      */
@@ -207,12 +227,13 @@ class DefaultGameEngine(
                     putAll(rerolled)
                     put(coord, resetChunk)
                 }
-                _state.value = snapshot.copy(
-                    chunks = chunks,
-                    meta = snapshot.meta.copy(
-                        flagsPlaced = (snapshot.meta.flagsPlaced - oldFlagCount).coerceAtLeast(0),
-                    ),
+                var meta = snapshot.meta.copy(
+                    flagsPlaced = (snapshot.meta.flagsPlaced - oldFlagCount).coerceAtLeast(0),
                 )
+                for (chunkCoord in chunks.keys) {
+                    meta = meta.expandExplored(chunkCoord)
+                }
+                _state.value = snapshot.copy(chunks = chunks, meta = meta)
                 _events.emit(GameEvent.ChunkWiped(coord))
             }
         }
@@ -228,6 +249,7 @@ private class EngineSession(
     var meta: GameMeta,
     private val mineGenerator: MineGenerator,
     private val cascadeRadiusChunks: Int,
+    private val limitCascadeToSelector: Boolean,
     private val batchSize: Int,
     private val clock: () -> Long,
     private val loadChunks: suspend (Set<ChunkCoord>) -> Map<ChunkCoord, Chunk>,
@@ -235,6 +257,17 @@ private class EngineSession(
     private val emit: suspend (GameEvent) -> Unit,
 ) {
     private var unpublishedReveals = 0
+
+    private fun putChunk(coord: ChunkCoord, chunk: Chunk) {
+        chunks[coord] = chunk
+        meta = meta.expandExplored(coord)
+    }
+
+    private fun putChunks(newChunks: Map<ChunkCoord, Chunk>) {
+        for ((coord, chunk) in newChunks) {
+            putChunk(coord, chunk)
+        }
+    }
 
     suspend fun reveal(cell: CellCoord) {
         ensureGenerated(cell)
@@ -276,7 +309,7 @@ private class EngineSession(
 
         val updatedCells = chunk.cells.toMutableList()
         updatedCells[localIndex] = current.copy(state = newState)
-        chunks[coord] = chunk.copy(cells = updatedCells)
+        putChunk(coord, chunk.copy(cells = updatedCells))
         meta = meta.copy(flagsPlaced = meta.flagsPlaced + flagsDelta)
         maybeCompleteFromPerfectFlags(coord)
         publishNow()
@@ -388,6 +421,7 @@ private class EngineSession(
 
     private suspend fun revealCascade(start: CellCoord, radiusOrigin: CellCoord = start) {
         val originChunk = cellToChunk(radiusOrigin)
+        val startChunk = cellToChunk(start)
         val visited = hashSetOf(start)
         val queue = ArrayDeque<CellCoord>()
         queue.add(start)
@@ -408,7 +442,10 @@ private class EngineSession(
             if (current.adjacentMines == 0) {
                 for (neighbor in neighbors8(cell)) {
                     if (neighbor in visited) continue
-                    if (chebyshevChunkDistance(cellToChunk(neighbor), originChunk) > cascadeRadiusChunks) {
+                    val neighborChunk = cellToChunk(neighbor)
+                    if (limitCascadeToSelector) {
+                        if (neighborChunk != startChunk) continue
+                    } else if (chebyshevChunkDistance(neighborChunk, originChunk) > cascadeRadiusChunks) {
                         continue
                     }
                     visited += neighbor
@@ -424,7 +461,7 @@ private class EngineSession(
         val localIndex = cellToLocalIndex(cell)
         val updatedCells = chunk.cells.toMutableList()
         updatedCells[localIndex] = before.copy(state = CellState.REVEALED)
-        chunks[coord] = chunk.copy(cells = updatedCells)
+        putChunk(coord, chunk.copy(cells = updatedCells))
         maybeAutoFlagAndClear(coord)
     }
 
@@ -434,24 +471,24 @@ private class EngineSession(
         val localIndex = cellToLocalIndex(cell)
         val updatedCells = chunk.cells.toMutableList()
         updatedCells[localIndex] = updatedCells[localIndex].copy(state = CellState.EXPLODED)
-        chunks[coord] = chunk.copy(
-            cells = updatedCells,
-            status = ChunkStatus.LOCKED,
-            lockedAt = clock(),
+        putChunk(
+            coord,
+            chunk.copy(
+                cells = updatedCells,
+                status = ChunkStatus.LOCKED,
+                lockedAt = clock(),
+            ),
         )
         emit(GameEvent.ChunkLocked(chunk = coord, explodedCell = cell))
     }
 
     /**
-     * Fires exactly once per chunk lifetime: revealing a cell can only drop the chunk's hidden
-     * non-mine count from one to zero a single time, since every cell thereafter is
-     * revealed/flagged and never returns to hidden (short of a T9 wipe, which resets the whole
-     * chunk and is out of this engine's scope).
+     * Fires exactly once per chunk lifetime: revealing a cell can make every safe cell revealed
+     * only once, since completed cells never return to hidden before a whole-selector wipe.
      */
     private suspend fun maybeAutoFlagAndClear(coord: ChunkCoord) {
         val chunk = chunks.getValue(coord)
-        val hiddenNonMineRemaining = chunk.cells.any { it.state == CellState.HIDDEN && !it.isMine }
-        if (hiddenNonMineRemaining) return
+        if (!chunk.allSafeCellsRevealed) return
 
         val updatedCells = chunk.cells.toMutableList()
         var newlyFlagged = 0
@@ -461,7 +498,10 @@ private class EngineSession(
                 newlyFlagged++
             }
         }
-        chunks[coord] = chunk.copy(cells = updatedCells)
+        val completed = chunk.copy(cells = updatedCells)
+        if (!completed.isSolved) return
+
+        putChunk(coord, completed)
         meta = meta.copy(
             flagsPlaced = meta.flagsPlaced + newlyFlagged,
             selectorsCleared = meta.selectorsCleared + 1,
@@ -518,7 +558,7 @@ private class EngineSession(
         if (chunks[coord]?.generated == true) return
 
         val result = mineGenerator.generateForFirstTouch(cell, chunks)
-        chunks.putAll(result.chunks)
+        putChunks(result.chunks)
     }
 
     /**
@@ -535,7 +575,7 @@ private class EngineSession(
         if (neighbors.all { chunks[it]?.generated == true }) return
 
         val result = mineGenerator.ensureNeighborsGenerated(coord, chunks)
-        chunks.putAll(result.chunks)
+        putChunks(result.chunks)
     }
 
     private suspend fun hydrateNeighborhood(coord: ChunkCoord) {
@@ -560,7 +600,7 @@ private class EngineSession(
         if (toLoad.isEmpty()) return
         for ((loadedCoord, loaded) in loadChunks(toLoad)) {
             if (loaded.generated && chunks[loadedCoord]?.generated != true) {
-                chunks[loadedCoord] = loaded
+                putChunk(loadedCoord, loaded)
             }
         }
     }
@@ -583,3 +623,12 @@ private class EngineSession(
 private fun Chunk.hasExploredCells(): Boolean =
     generated && cells.any { it.state == CellState.REVEALED || it.state == CellState.EXPLODED }
 
+/** Seeds [GameMeta] explored AABB from any chunks already present in [state]. */
+private fun seedExploredBounds(state: GameState): GameState {
+    if (state.chunks.isEmpty()) return state
+    var meta = state.meta
+    for (coord in state.chunks.keys) {
+        meta = meta.expandExplored(coord)
+    }
+    return if (meta == state.meta) state else state.copy(meta = meta)
+}

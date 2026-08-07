@@ -70,6 +70,52 @@ class DefaultGameEngineTest {
     }
 
     @Test
+    fun limitCascadeToSelectorKeepsZeroFloodInsideStartChunk() = runTest {
+        val engine = DefaultGameEngine(
+            mineGenerator = FixtureMineGenerator(emptyMap()),
+            backgroundDispatcher = Dispatchers.Unconfined,
+            cascadeRadiusChunks = 16,
+        )
+        engine.limitCascadeToSelector = true
+
+        engine.dispatch(GameAction.Reveal(CellCoord(0, 0)))
+
+        val origin = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertTrue(origin.cells.any { it.state == CellState.REVEALED })
+
+        val neighbor = requireNotNull(engine.state.value.chunks[ChunkCoord(1, 0)]) {
+            "Neighbor may be pre-generated for adjacency, but cascade must not reveal into it"
+        }
+        assertTrue(
+            "Cascade limited to selector must not reveal into neighbor; found revealed cells",
+            neighbor.cells.all { it.state == CellState.HIDDEN },
+        )
+    }
+
+    @Test
+    fun exploredBoundsExpandWhenCascadeGeneratesFarSelectors() = runTest {
+        val engine = DefaultGameEngine(
+            mineGenerator = FixtureMineGenerator(emptyMap()),
+            backgroundDispatcher = Dispatchers.Unconfined,
+            cascadeRadiusChunks = 2,
+        )
+
+        engine.dispatch(GameAction.Reveal(CellCoord(0, 0)))
+
+        val meta = engine.state.value.meta
+        assertTrue(meta.hasExploredBounds)
+        assertTrue(
+            "Explored AABB should span beyond a single origin chunk",
+            meta.exploredMinCx < 0 || meta.exploredMaxCx > 0 ||
+                meta.exploredMinCy < 0 || meta.exploredMaxCy > 0,
+        )
+        assertTrue(meta.exploredMinCx <= 0)
+        assertTrue(meta.exploredMaxCx >= 0)
+        assertTrue(meta.exploredMinCy <= 0)
+        assertTrue(meta.exploredMaxCy >= 0)
+    }
+
+    @Test
     fun cascadeCapRadiusStopsExpansionBeyondConfiguredChunkDistance() = runTest {
         val engine = DefaultGameEngine(
             mineGenerator = FixtureMineGenerator(emptyMap()),
@@ -250,6 +296,45 @@ class DefaultGameEngineTest {
         assertEquals(CellState.FLAGGED, stateAt(result, 1, 0))
         assertEquals(CellState.HIDDEN, stateAt(result, 7, 7))
         assertEquals(0, engine.state.value.meta.selectorsCleared)
+    }
+
+    @Test
+    fun excessFlagBlocksLastSafeRevealCompletionUntilFlagsAreCorrected() = runTest {
+        var chunk = chunkWithMines(ChunkCoord(0, 0), setOf(7 to 7))
+        for (y in 0..7) {
+            for (x in 0..7) {
+                if ((x == 7 && y == 7) || (x == 0 && y == 0) || (x == 1 && y == 1)) continue
+                chunk = chunk.withState(x, y, CellState.REVEALED)
+            }
+        }
+        chunk = chunk.withState(0, 0, CellState.FLAGGED)
+        val engine = engineWithChunk(
+            chunk,
+            cascadeRadiusChunks = 0,
+            meta = GameMeta(flagsPlaced = 1),
+        )
+        val events = mutableListOf<GameEvent>()
+        val collector = launch(Dispatchers.Unconfined) { engine.events.collect { events += it } }
+
+        engine.dispatch(GameAction.Reveal(CellCoord(1, 1)))
+
+        var result = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertEquals(CellState.HIDDEN, stateAt(result, 7, 7))
+        assertEquals(CellState.FLAGGED, stateAt(result, 0, 0))
+        assertFalse(result.isSolved)
+        assertEquals(0, engine.state.value.meta.selectorsCleared)
+        assertTrue(events.isEmpty())
+
+        engine.dispatch(GameAction.ToggleFlag(CellCoord(0, 0)))
+        engine.dispatch(GameAction.ToggleFlag(CellCoord(7, 7)))
+        collector.cancel()
+
+        result = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertEquals(CellState.REVEALED, stateAt(result, 0, 0))
+        assertEquals(CellState.FLAGGED, stateAt(result, 7, 7))
+        assertTrue(result.isSolved)
+        assertEquals(1, engine.state.value.meta.selectorsCleared)
+        assertEquals(listOf(GameEvent.ChunkCleared(ChunkCoord(0, 0))), events)
     }
 
     @Test
@@ -565,10 +650,11 @@ class DefaultGameEngineTest {
     }
 
     @Test
-    fun resetSolvedChunkRerollsAFreshBoardWithoutIncrementingSelectorsWiped() = runTest {
+    fun resetSolvedChunkPreservesPerimeterAndNeighborCluesWithoutCountingAWipe() = runTest {
         val center = ChunkCoord(0, 0)
         val generator = SeededMineGenerator(seed = 12345L)
-        val rolled = generator.reroll(center, emptyMap()).chunks.getValue(center)
+        val known = generator.generateForFirstTouch(CellCoord(3, 3), emptyMap()).chunks
+        val rolled = known.getValue(center)
         // Make it "solved": every non-mine cell REVEALED, every mine cell FLAGGED.
         val solvedCells = rolled.cells.map { cell ->
             if (cell.isMine) cell.copy(state = CellState.FLAGGED) else cell.copy(state = CellState.REVEALED)
@@ -578,7 +664,7 @@ class DefaultGameEngineTest {
         val engine = DefaultGameEngine(
             mineGenerator = generator,
             initialState = GameState(
-                chunks = mapOf(center to solvedChunk),
+                chunks = known + (center to solvedChunk),
                 meta = GameMeta(flagsPlaced = flagCount, selectorsCleared = 1),
             ),
             backgroundDispatcher = Dispatchers.Unconfined,
@@ -591,6 +677,29 @@ class DefaultGameEngineTest {
 
         val result = engine.state.value.chunks.getValue(center)
         assertTrue(result.cells.all { it.state == CellState.HIDDEN })
+        for (index in rolled.cells.indices) {
+            val x = index % 8
+            val y = index / 8
+            if (x == 0 || x == 7 || y == 0 || y == 7) {
+                assertEquals(rolled.cells[index].isMine, result.cells[index].isMine)
+            }
+        }
+        assertTrue(
+            rolled.cells.indices.any { index ->
+                val x = index % 8
+                val y = index / 8
+                x in 1..6 && y in 1..6 &&
+                    rolled.cells[index].isMine != result.cells[index].isMine
+            },
+        )
+        for ((coord, before) in known) {
+            if (coord == center) continue
+            assertEquals(
+                "Reset changed neighbor $coord",
+                before.cells.map { it.adjacentMines to it.state },
+                engine.state.value.chunks.getValue(coord).cells.map { it.adjacentMines to it.state },
+            )
+        }
         assertEquals(ChunkStatus.NORMAL, result.status)
         assertFalse(result.everSurrounded)
         assertEquals(0, engine.state.value.meta.flagsPlaced)
@@ -609,10 +718,38 @@ class DefaultGameEngineTest {
         assertEquals(chunk, engine.state.value.chunks.getValue(ChunkCoord(0, 0)))
     }
 
-    private fun engineWithChunk(chunk: Chunk, cascadeRadiusChunks: Int): DefaultGameEngine =
+    @Test
+    fun resetSolvedChunkRejectsAllVisibleSelectorWithExcessSafeFlag() = runTest {
+        var chunk = chunkWithMines(ChunkCoord(0, 0), setOf(0 to 0))
+        for (y in 0..7) {
+            for (x in 0..7) {
+                chunk = chunk.withState(
+                    x,
+                    y,
+                    if ((x == 0 && y == 0) || (x == 1 && y == 0)) {
+                        CellState.FLAGGED
+                    } else {
+                        CellState.REVEALED
+                    },
+                )
+            }
+        }
+        assertFalse(chunk.isSolved)
+        val engine = engineWithChunk(chunk, cascadeRadiusChunks = 0)
+
+        engine.resetSolvedChunk(ChunkCoord(0, 0))
+
+        assertEquals(chunk, engine.state.value.chunks.getValue(ChunkCoord(0, 0)))
+    }
+
+    private fun engineWithChunk(
+        chunk: Chunk,
+        cascadeRadiusChunks: Int,
+        meta: GameMeta = GameMeta(),
+    ): DefaultGameEngine =
         DefaultGameEngine(
             mineGenerator = FixtureMineGenerator(mapOf(chunk.coord to chunk)),
-            initialState = GameState(chunks = mapOf(chunk.coord to chunk)),
+            initialState = GameState(chunks = mapOf(chunk.coord to chunk), meta = meta),
             backgroundDispatcher = Dispatchers.Unconfined,
             cascadeRadiusChunks = cascadeRadiusChunks,
         )

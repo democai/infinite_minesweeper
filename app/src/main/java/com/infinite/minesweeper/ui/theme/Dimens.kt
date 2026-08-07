@@ -16,8 +16,16 @@ object BoardDimens {
      */
     const val LodThresholdDp: Float = 6f
 
-    /** Minimum and maximum pinch-zoom multipliers relative to [BaseCellSizeDp]. */
+    /** Baseline minimum pinch-zoom multiplier relative to [BaseCellSizeDp]. */
     const val MinZoom: Float = 0.05f
+
+    /**
+     * Hard floor for dynamic zoom-out. Explored-extent fit zoom may lower the effective min below
+     * [MinZoom], but never past this value (render/cache sanity).
+     */
+    const val AbsoluteMinZoom: Float = 0.01f
+
+    /** Maximum pinch-zoom multiplier relative to [BaseCellSizeDp]. */
     const val MaxZoom: Float = 4f
 
     /**

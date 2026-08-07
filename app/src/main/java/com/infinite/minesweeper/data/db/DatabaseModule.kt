@@ -25,6 +25,43 @@ internal val MIGRATION_1_2 = object : Migration(1, 2) {
     }
 }
 
+/**
+ * Adds durable explored-selector AABB columns and backfills from the chunks table so existing
+ * saves can immediately unlock further zoom-out proportional to how far the player has explored.
+ */
+internal val MIGRATION_2_3 = object : Migration(2, 3) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL(
+            "ALTER TABLE game_meta ADD COLUMN hasExploredBounds INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE game_meta ADD COLUMN exploredMinCx INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE game_meta ADD COLUMN exploredMaxCx INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE game_meta ADD COLUMN exploredMinCy INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            "ALTER TABLE game_meta ADD COLUMN exploredMaxCy INTEGER NOT NULL DEFAULT 0",
+        )
+        db.execSQL(
+            """
+            UPDATE game_meta
+            SET
+              hasExploredBounds = CASE
+                WHEN (SELECT COUNT(*) FROM chunks) > 0 THEN 1 ELSE 0
+              END,
+              exploredMinCx = COALESCE((SELECT MIN(cx) FROM chunks), 0),
+              exploredMaxCx = COALESCE((SELECT MAX(cx) FROM chunks), 0),
+              exploredMinCy = COALESCE((SELECT MIN(cy) FROM chunks), 0),
+              exploredMaxCy = COALESCE((SELECT MAX(cy) FROM chunks), 0)
+            """.trimIndent(),
+        )
+    }
+}
+
 @Module
 @InstallIn(SingletonComponent::class)
 object DatabaseModule {
@@ -36,7 +73,7 @@ object DatabaseModule {
             MinesweeperDatabase::class.java,
             DATABASE_NAME,
         )
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .build()
 
     @Provides

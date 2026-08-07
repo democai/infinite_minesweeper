@@ -23,12 +23,25 @@ data class Chunk(
         }
     }
 
+    /** True when every safe cell is revealed, regardless of the state of mine cells. */
+    internal val allSafeCellsRevealed: Boolean
+        get() = generated && cells.all { cell ->
+            cell.isMine || cell.state == CellState.REVEALED
+        }
+
     /**
-     * True when every cell is revealed or flagged and the selector is not locked. Matches the
-     * player-visible "solved" state used by the blue tint and the lock surround check.
+     * True when every safe cell is revealed, every mine is flagged, and the selector is not
+     * locked. This is the shared solved state used by rendering, reset eligibility, and lock
+     * surround checks.
      */
     val isSolved: Boolean
         get() = generated &&
             status != ChunkStatus.LOCKED &&
-            cells.all { it.state == CellState.REVEALED || it.state == CellState.FLAGGED }
+            cells.all { cell ->
+                if (cell.isMine) {
+                    cell.state == CellState.FLAGGED
+                } else {
+                    cell.state == CellState.REVEALED
+                }
+            }
 }

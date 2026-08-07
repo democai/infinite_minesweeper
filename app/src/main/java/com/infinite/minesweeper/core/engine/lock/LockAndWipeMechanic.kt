@@ -201,8 +201,7 @@ class LockAndWipeMechanic(
         meta: GameMeta,
     ): SoftResolveCompletion {
         val chunk = chunks.getValue(coord)
-        val hiddenNonMineRemaining = chunk.cells.any { it.state == CellState.HIDDEN && !it.isMine }
-        if (hiddenNonMineRemaining) {
+        if (!chunk.allSafeCellsRevealed) {
             return SoftResolveCompletion(chunks, meta, cleared = false)
         }
 
@@ -214,8 +213,12 @@ class LockAndWipeMechanic(
                 newlyFlagged++
             }
         }
+        val completedChunk = chunk.copy(cells = updatedCells)
+        if (!completedChunk.isSolved) {
+            return SoftResolveCompletion(chunks, meta, cleared = false)
+        }
         val completed = chunks.toMutableMap().apply {
-            put(coord, chunk.copy(cells = updatedCells))
+            put(coord, completedChunk)
         }
         return SoftResolveCompletion(
             chunks = completed,

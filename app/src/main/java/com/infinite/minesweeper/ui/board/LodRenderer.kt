@@ -42,8 +42,8 @@ object LodRenderer {
     fun shouldUseLod(cellSizeDp: Float): Boolean = cellSizeDp < BoardDimens.LodThresholdDp
 
     /**
-     * Completed selectors have no hidden (or exploded) cells left: every cell is revealed or
-     * flagged. Delegates to [Chunk.isSolved] so LOD, the blue tint, and lock surround agree.
+     * Completed selectors have every safe cell revealed and every mine flagged. Delegates to
+     * [Chunk.isSolved] so LOD, the blue tint, reset eligibility, and lock surround agree.
      */
     fun isCompletedChunk(chunk: Chunk): Boolean = chunk.isSolved
 

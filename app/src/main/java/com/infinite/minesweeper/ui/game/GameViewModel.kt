@@ -70,6 +70,11 @@ class GameViewModel @Inject constructor(
             launch {
                 inputBindingPreferences.binding.collect { binding = it }
             }
+            launch {
+                inputBindingPreferences.limitCascadeToSelector.collect { enabled ->
+                    engine?.limitCascadeToSelector = enabled
+                }
+            }
             startSession(fresh = false)
         }
     }
@@ -88,8 +93,10 @@ class GameViewModel @Inject constructor(
             lockAndWipeMechanic = LockAndWipeMechanic(generator),
             loadChunks = { coords -> repository.getChunks(coords) },
         )
+        createdEngine.limitCascadeToSelector =
+            inputBindingPreferences.limitCascadeToSelector.first()
         engine = createdEngine
-        _state.value = restored
+        _state.value = createdEngine.state.value
 
         val job = SupervisorJob(viewModelScope.coroutineContext[Job])
         sessionJob = job

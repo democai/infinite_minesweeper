@@ -121,13 +121,13 @@ class SeededMineGenerator(
         val previous = knownChunks[coord] ?: Chunk(coord = coord)
         val rerolled = rollChunk(
             chunk = previous.copy(
-                cells = List(CHUNK_SIDE_LENGTH * CHUNK_SIDE_LENGTH) { Cell() },
                 status = ChunkStatus.NORMAL,
                 everSurrounded = false,
                 lockedAt = null,
             ),
             excludedFromMines = emptySet(),
             salt = REROLL_SALT,
+            preserveMinePerimeter = previous.generated,
         )
         val merged = knownChunks.toMutableMap().apply { put(coord, rerolled) }
         val adjacencyTargets = neighborhood(coord)
@@ -146,6 +146,7 @@ class SeededMineGenerator(
         chunk: Chunk,
         excludedFromMines: Set<CellCoord>,
         salt: Long,
+        preserveMinePerimeter: Boolean = false,
     ): Chunk {
         val random = Random(chunkSeed(chunk.coord, salt))
         val density = mineDensityFor(chunk.coord).toDouble()
@@ -155,7 +156,12 @@ class SeededMineGenerator(
                 y = index / CHUNK_SIDE_LENGTH,
             )
             val world = chunkLocalToCell(chunk.coord, local)
-            val isMine = random.nextDouble() < density && world !in excludedFromMines
+            val rolledMine = random.nextDouble() < density && world !in excludedFromMines
+            val isMine = if (preserveMinePerimeter && local.isPerimeter()) {
+                cell.isMine
+            } else {
+                rolledMine
+            }
             cell.copy(
                 state = if (cell.state == CellState.EXPLODED && !isMine) {
                     CellState.HIDDEN
@@ -178,6 +184,9 @@ class SeededMineGenerator(
         return mixed xor (mixed ushr 31)
     }
 }
+
+private fun LocalCellCoord.isPerimeter(): Boolean =
+    x == 0 || x == CHUNK_SIDE_LENGTH - 1 || y == 0 || y == CHUNK_SIDE_LENGTH - 1
 
 /** Maps a 64-bit mix into `[0, 1)` using the top 53 bits (same construction as `Random.nextDouble`). */
 internal fun unitInterval(mixed: Long): Double =

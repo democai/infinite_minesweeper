@@ -101,6 +101,11 @@ class RoomChunkRepositoryTest {
             viewportY = 59f,
             zoom = 1.25f,
             hasEverRevealed = true,
+            hasExploredBounds = true,
+            exploredMinCx = -2,
+            exploredMaxCx = 4,
+            exploredMinCy = -1,
+            exploredMaxCy = 3,
         )
 
         repository.saveGameMeta(meta)

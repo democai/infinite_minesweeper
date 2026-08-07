@@ -171,6 +171,68 @@ class LockAndWipeMechanicTest {
     }
 
     @Test
+    fun softResolveDoesNotCompleteWhileASafeCellIsIncorrectlyFlagged() = runTest {
+        val center = ChunkCoord(0, 0)
+        val east = ChunkCoord(1, 0)
+        val chunks = completedNeighborhood(center).toMutableMap()
+        val cells = List(64) { index ->
+            when (index) {
+                0 -> Cell(state = CellState.EXPLODED, isMine = true)
+                1 -> Cell(state = CellState.HIDDEN, isMine = true)
+                2 -> Cell(state = CellState.FLAGGED)
+                else -> Cell(state = CellState.REVEALED)
+            }
+        }
+        chunks[center] = Chunk(
+            coord = center,
+            generated = true,
+            cells = cells,
+            status = ChunkStatus.LOCKED,
+            lockedAt = 1L,
+        )
+
+        val result = mechanic().process(
+            GameEvent.ChunkCleared(east),
+            GameState(
+                chunks = recomputeAdjacency(chunks),
+                meta = GameMeta(flagsPlaced = 1, selectorsCleared = 8),
+            ),
+        )
+
+        val resolved = result.state.chunks.getValue(center)
+        assertEquals(ChunkStatus.NORMAL, resolved.status)
+        assertTrue(resolved.everSurrounded)
+        assertEquals(CellState.REVEALED, resolved.cells[0].state)
+        assertEquals(CellState.HIDDEN, resolved.cells[1].state)
+        assertEquals(CellState.FLAGGED, resolved.cells[2].state)
+        assertFalse(resolved.isSolved)
+        assertEquals(1, result.state.meta.flagsPlaced)
+        assertEquals(8, result.state.meta.selectorsCleared)
+        assertEquals(listOf(GameEvent.ChunkSoftResolved(center)), result.events)
+    }
+
+    @Test
+    fun allVisibleNeighborWithExcessSafeFlagDoesNotCountAsSolvedRing() = runTest {
+        val center = ChunkCoord(0, 0)
+        val east = ChunkCoord(1, 0)
+        val chunks = completedNeighborhood(center).toMutableMap()
+        chunks[center] = lockedChunk(center, CellCoord(3, 3))
+        val invalidCells = chunks.getValue(east).cells.toMutableList()
+        invalidCells[0] = Cell(state = CellState.FLAGGED)
+        invalidCells[1] = Cell(state = CellState.FLAGGED, isMine = true)
+        chunks[east] = chunks.getValue(east).copy(cells = invalidCells)
+        assertFalse(chunks.getValue(east).isSolved)
+
+        val result = mechanic().process(
+            GameEvent.ChunkCleared(ChunkCoord(-1, 0)),
+            GameState(chunks = recomputeAdjacency(chunks)),
+        )
+
+        assertEquals(ChunkStatus.LOCKED, result.state.chunks.getValue(center).status)
+        assertTrue(result.events.isEmpty())
+    }
+
+    @Test
     fun hardWipeIsDeterministicResetsFlagsAndPatchesNeighborBorder() = runTest {
         val center = ChunkCoord(0, 0)
         val east = ChunkCoord(1, 0)
@@ -183,7 +245,7 @@ class LockAndWipeMechanicTest {
         assertTrue("Fixture seed must produce a mine", mineIndex >= 0)
         val hitCells = hit.cells.toMutableList()
         hitCells[mineIndex] = hitCells[mineIndex].copy(state = CellState.EXPLODED)
-        val flagIndex = hit.cells.indexOfFirst { !it.isMine && it.state == CellState.HIDDEN }
+        val flagIndex = hit.cells.indexOfFirst { !it.isMine }
         hitCells[flagIndex] = hitCells[flagIndex].copy(state = CellState.FLAGGED)
         hit = hit.copy(cells = hitCells, status = ChunkStatus.LOCKED, lockedAt = 4L)
 
@@ -219,6 +281,73 @@ class LockAndWipeMechanicTest {
         val eastAfter = first.state.chunks.getValue(east)
         assertTrue(eastAfter.cells.all { it.state == CellState.REVEALED })
         assertTrue(eastAfter.cells.any { it.adjacentMines != 8 })
+    }
+
+    @Test
+    fun hardWipePreservesMinePerimeterAndValidNeighborClues() = runTest {
+        val center = ChunkCoord(0, 0)
+        val generator = SeededMineGenerator(seed = 99173L)
+        val known = generator.generateForFirstTouch(CellCoord(3, 3), emptyMap()).chunks
+        val before = known.getValue(center)
+        val mineIndex = before.cells.indexOfFirst { it.isMine }
+        assertTrue("Fixture seed must produce a mine", mineIndex >= 0)
+        val hitCells = before.cells.toMutableList()
+        hitCells[mineIndex] = hitCells[mineIndex].copy(state = CellState.EXPLODED)
+        val flagIndex = before.cells.indexOfFirst { !it.isMine }
+        hitCells[flagIndex] = hitCells[flagIndex].copy(state = CellState.FLAGGED)
+        val hit = before.copy(
+            cells = hitCells,
+            status = ChunkStatus.LOCKED,
+            everSurrounded = true,
+            lockedAt = 4L,
+        )
+        val state = GameState(
+            chunks = known + (center to hit),
+            meta = GameMeta(flagsPlaced = 1),
+        )
+        val event = GameEvent.ChunkLocked(
+            center,
+            chunkLocalToCell(center, LocalCellCoord(mineIndex % 8, mineIndex / 8)),
+        )
+
+        val result = LockAndWipeMechanic(generator, Dispatchers.Unconfined).process(event, state)
+
+        val wiped = result.state.chunks.getValue(center)
+        for (index in before.cells.indices) {
+            val x = index % 8
+            val y = index / 8
+            if (x == 0 || x == 7 || y == 0 || y == 7) {
+                assertEquals(
+                    "Perimeter mine changed at ($x,$y)",
+                    before.cells[index].isMine,
+                    wiped.cells[index].isMine,
+                )
+            }
+        }
+        assertTrue(
+            "Fixture seed must produce a different 6x6 interior",
+            before.cells.indices.any { index ->
+                val x = index % 8
+                val y = index / 8
+                x in 1..6 && y in 1..6 &&
+                    before.cells[index].isMine != wiped.cells[index].isMine
+            },
+        )
+        assertTrue(wiped.cells.all { it.state == CellState.HIDDEN })
+        assertEquals(ChunkStatus.NORMAL, wiped.status)
+        assertFalse(wiped.everSurrounded)
+        assertEquals(null, wiped.lockedAt)
+        assertEquals(0, result.state.meta.flagsPlaced)
+        assertEquals(1, result.state.meta.selectorsWiped)
+        assertEquals(listOf(GameEvent.ChunkWiped(center)), result.events)
+        for ((coord, neighborBefore) in known) {
+            if (coord == center) continue
+            assertEquals(
+                "Hard wipe changed neighbor $coord",
+                neighborBefore.cells.map { it.adjacentMines to it.state },
+                result.state.chunks.getValue(coord).cells.map { it.adjacentMines to it.state },
+            )
+        }
     }
 
     private fun mechanic(): LockAndWipeMechanic =
