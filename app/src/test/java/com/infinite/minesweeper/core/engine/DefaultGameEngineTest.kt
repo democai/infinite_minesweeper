@@ -608,12 +608,11 @@ class DefaultGameEngineTest {
 
     @Test
     fun revealedBorderNumbersStayStableWhenAdjacentTerraIsOpened() = runTest {
-        // B's right-edge cell (15,0) touches a mine in C at (16,0). Without ensureRevealReady,
-        // revealing on B would bake adjacentMines=0, then opening C would patch it to 1.
+        // B's right-edge cell (15,0) borders pristine C. Under the frontier-safety rule, a mine
+        // on C's entry cell (16,0) is displaced before B's clue is committed, and later opening
+        // farther into C must not rewrite that revealed border number.
         var b = chunkWithMines(ChunkCoord(1, 0), emptySet()).withState(6, 0, CellState.REVEALED)
         val c = chunkWithMines(ChunkCoord(2, 0), setOf(0 to 0))
-        val withC = recomputeAdjacency(mapOf(b.coord to b, c.coord to c))
-        val cReady = withC.getValue(c.coord)
         val provisionalB = recomputeAdjacency(mapOf(b.coord to b)).getValue(b.coord)
         assertEquals(
             "Sanity: without C, border cell must look like zero",
@@ -622,7 +621,7 @@ class DefaultGameEngineTest {
         )
 
         val engine = DefaultGameEngine(
-            mineGenerator = FixtureMineGenerator(mapOf(c.coord to cReady)),
+            mineGenerator = FixtureMineGenerator(mapOf(c.coord to c)),
             initialState = GameState(
                 chunks = mapOf(provisionalB.coord to provisionalB),
                 meta = GameMeta(hasEverRevealed = true),
@@ -636,8 +635,8 @@ class DefaultGameEngineTest {
         val afterReveal = engine.state.value.chunks.getValue(ChunkCoord(1, 0))
         assertEquals(CellState.REVEALED, stateAt(afterReveal, 7, 0))
         assertEquals(
-            "Reveal-ready must count C's border mine before the cell is shown",
-            1,
+            "Frontier safety must keep the first playable cell in C from contributing a mine",
+            0,
             afterReveal.cells[0 * 8 + 7].adjacentMines,
         )
         assertTrue(engine.state.value.chunks[ChunkCoord(2, 0)]!!.generated)
@@ -647,6 +646,41 @@ class DefaultGameEngineTest {
         engine.dispatch(GameAction.Reveal(CellCoord(16, 1)))
         val stillB = engine.state.value.chunks.getValue(ChunkCoord(1, 0))
         assertEquals(snapshot, stillB.cells.map { it.adjacentMines to it.state })
+    }
+
+    @Test
+    fun newlyPlayableCellInPristineNeighborIsMadeSafeBeforeFirstEntry() = runTest {
+        val westCoord = ChunkCoord(0, 0)
+        val eastCoord = ChunkCoord(1, 0)
+        val west = chunkWithMines(westCoord, emptySet()).withState(6, 0, CellState.REVEALED)
+        val east = chunkWithMines(eastCoord, setOf(0 to 0))
+        val linked = recomputeAdjacency(mapOf(westCoord to west, eastCoord to east))
+
+        val engine = DefaultGameEngine(
+            mineGenerator = FixtureMineGenerator(emptyMap()),
+            initialState = GameState(
+                chunks = linked,
+                meta = GameMeta(hasEverRevealed = true),
+            ),
+            backgroundDispatcher = Dispatchers.Unconfined,
+            cascadeRadiusChunks = 0,
+        )
+
+        engine.dispatch(GameAction.Reveal(CellCoord(7, 0)))
+
+        val afterFrontierReveal = engine.state.value.chunks.getValue(eastCoord)
+        assertFalse(afterFrontierReveal.cells[0].isMine)
+        assertEquals(
+            0,
+            engine.state.value.chunks.getValue(westCoord).cells[7].adjacentMines,
+        )
+
+        engine.dispatch(GameAction.Reveal(CellCoord(8, 0)))
+
+        val eastAfterEntry = engine.state.value.chunks.getValue(eastCoord)
+        assertEquals(ChunkStatus.NORMAL, eastAfterEntry.status)
+        assertEquals(CellState.REVEALED, stateAt(eastAfterEntry, 0, 0))
+        assertEquals(0, eastAfterEntry.cells.count { it.state == CellState.EXPLODED })
     }
 
     @Test

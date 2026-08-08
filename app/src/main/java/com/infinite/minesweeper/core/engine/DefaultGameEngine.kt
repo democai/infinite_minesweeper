@@ -6,6 +6,7 @@ import com.infinite.minesweeper.core.coords.cellToChunk
 import com.infinite.minesweeper.core.coords.cellToLocalIndex
 import com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic
 import com.infinite.minesweeper.core.engine.lock.neighboringChunkCoords
+import com.infinite.minesweeper.core.generation.recomputeAdjacency
 import com.infinite.minesweeper.core.model.CHUNK_SIDE_LENGTH
 import com.infinite.minesweeper.core.model.Cell
 import com.infinite.minesweeper.core.model.CellCoord
@@ -430,9 +431,12 @@ private class EngineSession(
             val cell = queue.removeFirst()
             ensureGenerated(cell)
             ensureRevealReady(cellToChunk(cell))
-            val current = getCell(cell)
+            var current = getCell(cell)
             // A cascade only ever enqueues neighbors of a zero-adjacency cell, which by
             // definition cannot be mines; the mine/null guards are defensive, not load-bearing.
+            if (current == null || current.state != CellState.HIDDEN || current.isMine) continue
+            protectNewlyPlayablePristineNeighbors(cell)
+            current = getCell(cell)
             if (current == null || current.state != CellState.HIDDEN || current.isMine) continue
 
             revealCell(cell, current)
@@ -605,6 +609,74 @@ private class EngineSession(
         }
     }
 
+    /**
+     * When [revealedCell] becomes revealed, some cells in an untouched neighboring selector may
+     * become directly playable for the first time. Keep those cells mine-free by relocating any
+     * such mines elsewhere inside the untouched selector before the new clue is committed.
+     */
+    private fun protectNewlyPlayablePristineNeighbors(revealedCell: CellCoord) {
+        val protectedByChunk = buildMap<ChunkCoord, MutableSet<Int>> {
+            for (neighbor in neighbors8(revealedCell)) {
+                val coord = cellToChunk(neighbor)
+                val chunk = chunks[coord] ?: continue
+                if (!chunk.isPristine()) continue
+                if (neighbors8(neighbor).any { it != revealedCell && getCell(it)?.state == CellState.REVEALED }) {
+                    continue
+                }
+                getOrPut(coord) { linkedSetOf() } += cellToLocalIndex(neighbor)
+            }
+        }
+        if (protectedByChunk.isEmpty()) return
+
+        for ((coord, protectedIndices) in protectedByChunk) {
+            protectPristineChunk(coord, protectedIndices, revealedCell)
+        }
+    }
+
+    private fun protectPristineChunk(
+        coord: ChunkCoord,
+        protectedIndices: Set<Int>,
+        upcomingReveal: CellCoord,
+    ) {
+        val chunk = chunks[coord] ?: return
+        if (!chunk.isPristine()) return
+
+        val mineIndicesToMove = protectedIndices.filter { index -> chunk.cells[index].isMine }
+        if (mineIndicesToMove.isEmpty()) return
+
+        val destinationIndices = chunk.cells.indices.filter { index ->
+            index !in protectedIndices &&
+                !chunk.cells[index].isMine &&
+                !isAdjacentToAnyReveal(chunkLocalToCell(coord, localIndexToCoord(index)), upcomingReveal)
+        }
+        check(destinationIndices.size >= mineIndicesToMove.size) {
+            "Not enough safe relocation cells in pristine chunk $coord"
+        }
+
+        val updatedCells = chunk.cells.toMutableList()
+        for ((sourceIndex, destinationIndex) in mineIndicesToMove.sorted().zip(destinationIndices.sorted())) {
+            updatedCells[sourceIndex] = updatedCells[sourceIndex].copy(isMine = false)
+            updatedCells[destinationIndex] = updatedCells[destinationIndex].copy(isMine = true)
+        }
+
+        val merged = chunks.toMutableMap().apply {
+            put(coord, chunk.copy(cells = updatedCells))
+        }
+        val targets = (neighboringChunkCoords(coord) + coord)
+            .filterTo(linkedSetOf()) { merged[it]?.generated == true }
+        val patched = recomputeAdjacency(merged, targets)
+        for (target in targets) {
+            putChunk(target, requireNotNull(patched[target]))
+        }
+    }
+
+    private fun isAdjacentToAnyReveal(
+        cell: CellCoord,
+        upcomingReveal: CellCoord,
+    ): Boolean = neighbors8(cell).any { neighbor ->
+        neighbor == upcomingReveal || getCell(neighbor)?.state == CellState.REVEALED
+    }
+
     private fun getCell(cell: CellCoord): Cell? {
         val chunk = chunks[cellToChunk(cell)] ?: return null
         if (!chunk.generated) return null
@@ -622,6 +694,9 @@ private class EngineSession(
 
 private fun Chunk.hasExploredCells(): Boolean =
     generated && cells.any { it.state == CellState.REVEALED || it.state == CellState.EXPLODED }
+
+private fun Chunk.isPristine(): Boolean =
+    generated && cells.all { it.state == CellState.HIDDEN }
 
 /** Seeds [GameMeta] explored AABB from any chunks already present in [state]. */
 private fun seedExploredBounds(state: GameState): GameState {
