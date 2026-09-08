@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/src/main/res/drawable-nodpi/ic_launcher_emblem.png" alt="Infinite Minesweeper icon" width="180">
+  <img src="logo.png" alt="Infinite Minesweeper logo" width="180">
 </p>
 
 # Infinite Minesweeper
