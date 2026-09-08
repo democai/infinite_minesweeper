@@ -776,16 +776,141 @@ class DefaultGameEngineTest {
         assertEquals(chunk, engine.state.value.chunks.getValue(ChunkCoord(0, 0)))
     }
 
+    @Test
+    fun hintPrefersRemovingAWrongFlagOverRevealing() = runTest {
+        // Revealed (0,0) makes (1,0) playable. Wrong flag on safe (1,0); also a playable safe
+        // hidden at (0,1). Hint must clear the wrong flag and leave (0,1) hidden.
+        var chunk = chunkWithMines(ChunkCoord(0, 0), mineLocals = setOf(7 to 7))
+        chunk = chunk.withState(0, 0, CellState.REVEALED)
+        chunk = chunk.withState(1, 0, CellState.FLAGGED)
+        val engine = engineWithChunk(
+            chunk,
+            cascadeRadiusChunks = 0,
+            meta = GameMeta(hasEverRevealed = true, flagsPlaced = 1),
+            random = kotlin.random.Random(0),
+        )
+
+        engine.hint(ChunkCoord(0, 0))
+
+        val result = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertEquals(CellState.HIDDEN, stateAt(result, 1, 0))
+        assertEquals(CellState.HIDDEN, stateAt(result, 0, 1))
+        assertEquals(0, engine.state.value.meta.flagsPlaced)
+    }
+
+    @Test
+    fun hintRevealsAPlayableSafeCellAtRandom() = runTest {
+        // Mines block two of (0,0)'s neighbors so the only playable safe cell is numbered (1,0).
+        var chunk = chunkWithMines(ChunkCoord(0, 0), mineLocals = setOf(0 to 1, 1 to 1, 7 to 7))
+        chunk = chunk.withState(0, 0, CellState.REVEALED)
+        val engine = engineWithChunk(
+            chunk,
+            cascadeRadiusChunks = 0,
+            meta = GameMeta(hasEverRevealed = true),
+            random = kotlin.random.Random(1),
+        )
+
+        engine.hint(ChunkCoord(0, 0))
+
+        val result = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertEquals(CellState.REVEALED, stateAt(result, 1, 0))
+        assertEquals(CellState.HIDDEN, stateAt(result, 5, 5))
+        assertEquals(CellState.HIDDEN, stateAt(result, 7, 7))
+    }
+
+    @Test
+    fun hintFallsBackToUnreachableSafeWhenNoPlayableSafeOrWrongFlag() = runTest {
+        // Mine wall at x=4; left half fully revealed so no playable frontier remains on the
+        // left. Right-half safe cells are unreachable to normal play; hint must still open one.
+        val wall = (0..7).map { y -> 4 to y }.toSet()
+        var chunk = chunkWithMines(ChunkCoord(0, 0), wall)
+        for (y in 0..7) {
+            for (x in 0..3) {
+                chunk = chunk.withState(x, y, CellState.REVEALED)
+            }
+        }
+        val engine = engineWithChunk(
+            chunk,
+            cascadeRadiusChunks = 0,
+            meta = GameMeta(hasEverRevealed = true),
+            random = kotlin.random.Random(2),
+        )
+
+        engine.hint(ChunkCoord(0, 0))
+
+        val result = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        val revealedOnRight = (0..7).flatMap { y -> (5..7).map { x -> x to y } }
+            .count { (x, y) -> stateAt(result, x, y) == CellState.REVEALED }
+        assertTrue("hint should reveal at least one unreachable safe cell", revealedOnRight >= 1)
+        for (y in 0..7) {
+            val mineState = stateAt(result, 4, y)
+            assertTrue(
+                "wall mines stay unrevealed (hidden or auto-flagged on clear)",
+                mineState == CellState.HIDDEN || mineState == CellState.FLAGGED,
+            )
+        }
+    }
+
+    @Test
+    fun hintOnZeroCascadesRespectingLimitCascadeToSelector() = runTest {
+        var chunk = chunkWithMines(ChunkCoord(0, 0), mineLocals = emptySet())
+        chunk = chunk.withState(0, 0, CellState.REVEALED)
+        val engine = engineWithChunk(
+            chunk,
+            cascadeRadiusChunks = 16,
+            meta = GameMeta(hasEverRevealed = true),
+            random = kotlin.random.Random(4),
+        )
+        engine.limitCascadeToSelector = true
+
+        engine.hint(ChunkCoord(0, 0))
+
+        val home = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertTrue(home.cells.all { it.state == CellState.REVEALED })
+        assertTrue(
+            "cascade must not spill into a neighbor when limited",
+            engine.state.value.chunks
+                .filterKeys { it != ChunkCoord(0, 0) }
+                .values
+                .all { other -> other.cells.all { it.state == CellState.HIDDEN } },
+        )
+    }
+
+    @Test
+    fun hintDoesNothingWhenOnlyMinesRemainHidden() = runTest {
+        var chunk = chunkWithMines(ChunkCoord(0, 0), mineLocals = setOf(1 to 0))
+        chunk = chunk.withState(0, 0, CellState.REVEALED)
+        for (y in 0..7) {
+            for (x in 0..7) {
+                if (x == 0 && y == 0) continue
+                if (x == 1 && y == 0) continue
+                chunk = chunk.withState(x, y, CellState.REVEALED)
+            }
+        }
+        val before = chunk
+        val engine = engineWithChunk(
+            before,
+            cascadeRadiusChunks = 0,
+            meta = GameMeta(hasEverRevealed = true),
+        )
+
+        engine.hint(ChunkCoord(0, 0))
+
+        assertEquals(before, engine.state.value.chunks.getValue(ChunkCoord(0, 0)))
+    }
+
     private fun engineWithChunk(
         chunk: Chunk,
         cascadeRadiusChunks: Int,
         meta: GameMeta = GameMeta(),
+        random: kotlin.random.Random = kotlin.random.Random.Default,
     ): DefaultGameEngine =
         DefaultGameEngine(
             mineGenerator = FixtureMineGenerator(mapOf(chunk.coord to chunk)),
             initialState = GameState(chunks = mapOf(chunk.coord to chunk), meta = meta),
             backgroundDispatcher = Dispatchers.Unconfined,
             cascadeRadiusChunks = cascadeRadiusChunks,
+            random = random,
         )
 
     private fun stateAt(chunk: Chunk, x: Int, y: Int): CellState =

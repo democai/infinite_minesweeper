@@ -21,6 +21,7 @@ import com.infinite.minesweeper.data.persistence.GamePersistenceCoordinator
 import com.infinite.minesweeper.data.persistence.GameSaveCodec
 import com.infinite.minesweeper.data.persistence.ViewportSnapshot
 import com.infinite.minesweeper.data.persistence.restoreGameState
+import com.infinite.minesweeper.ui.settings.HintMenuPolicy
 import com.infinite.minesweeper.ui.settings.InputActionMapper
 import com.infinite.minesweeper.ui.settings.InputBinding
 import com.infinite.minesweeper.ui.settings.InputBindingPreferences
@@ -215,6 +216,33 @@ class GameViewModel @Inject constructor(
             }
             activeEngine.dispatch(action)
         }
+    }
+
+    /**
+     * True when a cell-level long-press should open the hint menu rather than dispatching a
+     * reveal/flag. Ungenerated terra still goes through normal dispatch (first-touch path).
+     */
+    fun shouldOpenHintMenu(cell: CellCoord): Boolean {
+        val current = _state.value
+        if (current.isProcessing) return false
+        val coord = cellToChunk(cell)
+        val chunk = current.chunks[coord] ?: return false
+        val cellState = chunk.cells[cellToLocalIndex(cell)].state
+        return HintMenuPolicy.shouldOpen(
+            cell = cell,
+            cellState = cellState,
+            binding = binding,
+            chunk = chunk,
+            chunks = current.chunks,
+            hasEverRevealed = current.meta.hasEverRevealed,
+        )
+    }
+
+    /** Applies the hint tool to an active selector (see [DefaultGameEngine.hint]). */
+    fun hint(coord: ChunkCoord) {
+        if (_state.value.isProcessing) return
+        val activeEngine = engine ?: return
+        viewModelScope.launch { activeEngine.hint(coord) }
     }
 
     /** Resets an already-solved selector back to hidden with a fresh mine layout. */

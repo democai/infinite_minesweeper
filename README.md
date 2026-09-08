@@ -39,6 +39,8 @@ Long-press duration defaults to **Medium** (400 ms); Short and Long are availabl
 - Numbers show how many mines touch that cell (including across selector borders).
 - Tap a revealed number whose flags match its count to **chord** — reveal the remaining neighbors.
 - When every safe cell in a selector is revealed, its remaining mines auto-flag.
+- Long-press a cleared cell (or one outside the playable frontier) in an active selector for a
+  **Hint**: removes a wrong flag there, or reveals one safe cell (cascade on 0 follows settings).
 
 **Lock and wipe**
 

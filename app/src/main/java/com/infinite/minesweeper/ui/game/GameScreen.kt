@@ -34,6 +34,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.infinite.minesweeper.core.cache.DEFAULT_RETENTION_MARGIN_CHUNKS
+import com.infinite.minesweeper.core.coords.cellToChunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.ui.board.BoardEffect
@@ -204,7 +205,7 @@ fun GameScreen(
         }
     }
 
-    var resetChunkPrompt by remember { mutableStateOf<Pair<ChunkCoord, Offset>?>(null) }
+    var selectorMenu by remember { mutableStateOf<Pair<ChunkCoord, Offset>?>(null) }
 
     Box(modifier = modifier.fillMaxSize()) {
         ViewportBoardCanvas(
@@ -212,30 +213,47 @@ fun GameScreen(
             viewportState = viewportState,
             modifier = Modifier.fillMaxSize(),
             onTap = { viewModel.dispatch(TapKind.TAP, it) },
-            onLongPress = { viewModel.dispatch(TapKind.LONG_PRESS, it) },
+            onLongPress = { cell, position ->
+                if (viewModel.shouldOpenHintMenu(cell)) {
+                    selectorMenu = cellToChunk(cell) to position
+                } else {
+                    viewModel.dispatch(TapKind.LONG_PRESS, cell)
+                }
+            },
             longPressTimeoutMs = longPressDuration.timeoutMs,
             onSolvedSelectorLongPress = { coord, position ->
-                if (state.chunks[coord]?.isSolved == true) resetChunkPrompt = coord to position
+                if (state.chunks[coord]?.isSolved == true) selectorMenu = coord to position
             },
             effect = effectChunk?.let {
                 BoardEffect(chunk = it, color = effectColor, alpha = effectAlpha.value)
             },
         )
-        resetChunkPrompt?.let { (coord, position) ->
+        selectorMenu?.let { (coord, position) ->
+            val isSolved = state.chunks[coord]?.isSolved == true
             DropdownMenu(
                 expanded = true,
-                onDismissRequest = { resetChunkPrompt = null },
+                onDismissRequest = { selectorMenu = null },
                 offset = with(density) {
                     DpOffset(x = position.x.toDp(), y = position.y.toDp())
                 },
             ) {
-                DropdownMenuItem(
-                    text = { Text("Reset selector") },
-                    onClick = {
-                        viewModel.resetSelector(coord)
-                        resetChunkPrompt = null
-                    },
-                )
+                if (isSolved) {
+                    DropdownMenuItem(
+                        text = { Text("Reset selector") },
+                        onClick = {
+                            viewModel.resetSelector(coord)
+                            selectorMenu = null
+                        },
+                    )
+                } else {
+                    DropdownMenuItem(
+                        text = { Text("Hint") },
+                        onClick = {
+                            viewModel.hint(coord)
+                            selectorMenu = null
+                        },
+                    )
+                }
             }
         }
         GameHud(

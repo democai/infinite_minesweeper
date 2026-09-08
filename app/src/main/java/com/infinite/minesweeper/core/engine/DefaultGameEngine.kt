@@ -7,7 +7,6 @@ import com.infinite.minesweeper.core.coords.cellToLocalIndex
 import com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic
 import com.infinite.minesweeper.core.engine.lock.neighboringChunkCoords
 import com.infinite.minesweeper.core.generation.recomputeAdjacency
-import com.infinite.minesweeper.core.model.CHUNK_SIDE_LENGTH
 import com.infinite.minesweeper.core.model.Cell
 import com.infinite.minesweeper.core.model.CellCoord
 import com.infinite.minesweeper.core.model.CellState
@@ -20,6 +19,7 @@ import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
 import com.infinite.minesweeper.core.model.MineGenerator
+import kotlin.random.Random
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -57,6 +57,7 @@ class DefaultGameEngine(
     private val batchSize: Int = DEFAULT_BATCH_SIZE,
     private val clock: () -> Long = System::currentTimeMillis,
     private val loadChunks: suspend (Set<ChunkCoord>) -> Map<ChunkCoord, Chunk> = { emptyMap() },
+    private val random: Random = Random.Default,
 ) : GameEngine {
 
     private val dispatchMutex = Mutex()
@@ -164,6 +165,7 @@ class DefaultGameEngine(
                     batchSize = batchSize,
                     clock = clock,
                     loadChunks = loadChunks,
+                    random = random,
                     publish = { chunks, meta ->
                         _state.value = GameState(chunks = chunks, meta = meta, isProcessing = true)
                     },
@@ -176,26 +178,64 @@ class DefaultGameEngine(
                     is GameAction.Chord -> session.chord(action.cell)
                 }
 
-                var integratedState = GameState(
-                    chunks = session.chunks.toMap(),
-                    meta = session.meta,
-                    isProcessing = false,
-                )
-                // Soft-resolve can complete a chunk and emit ChunkCleared; feed derived events back
-                // through the mechanic so neighboring locks re-evaluate in the same dispatch.
-                val eventQueue = ArrayDeque(pendingEvents)
-                while (eventQueue.isNotEmpty()) {
-                    val event = eventQueue.removeFirst()
-                    val transition = lockAndWipeMechanic?.process(event, integratedState)
-                    if (transition != null) {
-                        integratedState = transition.state
-                        eventQueue.addAll(transition.events)
-                    }
-                    _events.emit(event)
-                }
-                _state.value = integratedState.copy(isProcessing = false)
+                finishSession(session, pendingEvents)
             }
         }
+    }
+
+    /**
+     * Hint tool for an active selector: prefers removing one incorrectly placed flag in [coord],
+     * else reveals one safe hidden cell there (playable cells first, then any safe hidden cell).
+     * A zero triggers the normal cascade, respecting [limitCascadeToSelector]. No-ops when the
+     * chunk is missing, locked, solved, or has nothing safe left to clear.
+     *
+     * Chunk-scoped like [resetSolvedChunk], not part of [GameAction].
+     */
+    suspend fun hint(coord: ChunkCoord) {
+        dispatchMutex.withLock {
+            withContext(backgroundDispatcher) {
+                val snapshot = _state.value
+                val pendingEvents = mutableListOf<GameEvent>()
+                val session = EngineSession(
+                    chunks = snapshot.chunks.toMutableMap(),
+                    meta = snapshot.meta,
+                    mineGenerator = mineGenerator,
+                    cascadeRadiusChunks = cascadeRadiusChunks,
+                    limitCascadeToSelector = limitCascadeToSelector,
+                    batchSize = batchSize,
+                    clock = clock,
+                    loadChunks = loadChunks,
+                    random = random,
+                    publish = { chunks, meta ->
+                        _state.value = GameState(chunks = chunks, meta = meta, isProcessing = true)
+                    },
+                    emit = { event -> pendingEvents += event },
+                )
+                session.hint(coord)
+                finishSession(session, pendingEvents)
+            }
+        }
+    }
+
+    private suspend fun finishSession(session: EngineSession, pendingEvents: List<GameEvent>) {
+        var integratedState = GameState(
+            chunks = session.chunks.toMap(),
+            meta = session.meta,
+            isProcessing = false,
+        )
+        // Soft-resolve can complete a chunk and emit ChunkCleared; feed derived events back
+        // through the mechanic so neighboring locks re-evaluate in the same dispatch.
+        val eventQueue = ArrayDeque(pendingEvents)
+        while (eventQueue.isNotEmpty()) {
+            val event = eventQueue.removeFirst()
+            val transition = lockAndWipeMechanic?.process(event, integratedState)
+            if (transition != null) {
+                integratedState = transition.state
+                eventQueue.addAll(transition.events)
+            }
+            _events.emit(event)
+        }
+        _state.value = integratedState.copy(isProcessing = false)
     }
 
     /**
@@ -254,6 +294,7 @@ private class EngineSession(
     private val batchSize: Int,
     private val clock: () -> Long,
     private val loadChunks: suspend (Set<ChunkCoord>) -> Map<ChunkCoord, Chunk>,
+    private val random: Random,
     private val publish: suspend (Map<ChunkCoord, Chunk>, GameMeta) -> Unit,
     private val emit: suspend (GameEvent) -> Unit,
 ) {
@@ -278,7 +319,7 @@ private class EngineSession(
         if (current.state != CellState.HIDDEN) return
         // Every board's first-ever reveal is exempt (nothing has been explored yet to be
         // adjacent to); every reveal after that must satisfy isPlayable.
-        if (meta.hasEverRevealed && !isPlayable(cell)) return
+        if (meta.hasEverRevealed && !isPlayableCell(cell, chunks)) return
 
         if (!meta.hasEverRevealed) meta = meta.copy(hasEverRevealed = true)
         if (current.isMine) {
@@ -299,7 +340,7 @@ private class EngineSession(
         if (chunk.isSolved) return
         // Flagging is never bootstrap-exempt: there's always something to be adjacent to by the
         // time flagging is meaningful (it requires a HIDDEN cell to already exist as a target).
-        if (!isPlayable(cell)) return
+        if (!isPlayableCell(cell, chunks)) return
         val localIndex = cellToLocalIndex(cell)
         val current = chunk.cells[localIndex]
         val (newState, flagsDelta) = when (current.state) {
@@ -314,6 +355,60 @@ private class EngineSession(
         meta = meta.copy(flagsPlaced = meta.flagsPlaced + flagsDelta)
         maybeCompleteFromPerfectFlags(coord)
         publishNow()
+    }
+
+    /**
+     * See [DefaultGameEngine.hint]. Prefers wrong-flag removal, then a playable safe reveal, then
+     * any safe hidden cell in [coord]. Never detonates.
+     */
+    suspend fun hint(coord: ChunkCoord) {
+        val chunk = chunks[coord] ?: return
+        if (!chunk.generated || chunk.status == ChunkStatus.LOCKED || chunk.isSolved) return
+
+        val wrongFlagIndices = chunk.cells.indices.filter { index ->
+            val cell = chunk.cells[index]
+            cell.state == CellState.FLAGGED && !cell.isMine
+        }
+        if (wrongFlagIndices.isNotEmpty()) {
+            removeWrongFlag(coord, wrongFlagIndices.random(random))
+            publishNow()
+            return
+        }
+
+        val playableSafe = mutableListOf<Int>()
+        val unreachableSafe = mutableListOf<Int>()
+        for (index in chunk.cells.indices) {
+            val cell = chunk.cells[index]
+            if (cell.state != CellState.HIDDEN || cell.isMine) continue
+            val world = chunkLocalToCell(coord, localIndexToCoord(index))
+            if (isPlayableCell(world, chunks)) {
+                playableSafe += index
+            } else {
+                unreachableSafe += index
+            }
+        }
+        val revealIndex = when {
+            playableSafe.isNotEmpty() -> playableSafe.random(random)
+            unreachableSafe.isNotEmpty() -> unreachableSafe.random(random)
+            else -> return
+        }
+        val target = chunkLocalToCell(coord, localIndexToCoord(revealIndex))
+        ensureRevealReady(coord)
+        if (!meta.hasEverRevealed) meta = meta.copy(hasEverRevealed = true)
+        revealCascade(target)
+        publishNow()
+    }
+
+    private suspend fun removeWrongFlag(coord: ChunkCoord, localIndex: Int) {
+        val chunk = chunks.getValue(coord)
+        val current = chunk.cells[localIndex]
+        check(current.state == CellState.FLAGGED && !current.isMine) {
+            "hint wrong-flag path requires a flagged non-mine at $coord[$localIndex]"
+        }
+        val updatedCells = chunk.cells.toMutableList()
+        updatedCells[localIndex] = current.copy(state = CellState.HIDDEN)
+        putChunk(coord, chunk.copy(cells = updatedCells))
+        meta = meta.copy(flagsPlaced = (meta.flagsPlaced - 1).coerceAtLeast(0))
     }
 
     suspend fun chord(cell: CellCoord) {
@@ -350,74 +445,6 @@ private class EngineSession(
             }
         }
         publishNow()
-    }
-
-    /**
-     * True when [cell] may be touched by a direct player action: it's Moore-adjacent to a
-     * [CellState.REVEALED] cell, or it qualifies for the bounded "solved ring" exception (a
-     * pocket of hidden cells fully enclosed by already-solved territory, which would otherwise
-     * be permanently unreachable — e.g. an interior cell whose entire neighborhood is flagged
-     * mines). Cascaded/chorded reveals are trusted consequences of one already-gated action and
-     * must not call this per cell.
-     */
-    private fun isPlayable(cell: CellCoord): Boolean {
-        if (neighbors8(cell).any { getCell(it)?.state == CellState.REVEALED }) return true
-        return isInSolvedRing(cell)
-    }
-
-    private fun isInSolvedRing(cell: CellCoord): Boolean {
-        val coord = cellToChunk(cell)
-        if (isChunkSolvedRing(coord)) return true
-        return floodFillEnclosed(cell, coord)
-    }
-
-    /**
-     * Fast path: mirrors [com.infinite.minesweeper.core.engine.lock.LockAndWipeMechanic]'s
-     * surrounded-selector check — a chunk whose 8 neighbors are all solved (locked peers
-     * skipped, same as there) has every one of its hidden cells playable without the more
-     * expensive per-cell fallback below.
-     */
-    private fun isChunkSolvedRing(coord: ChunkCoord): Boolean {
-        val neighbors = neighboringChunkCoords(coord)
-        if (neighbors.size != 8) return false
-        var solvedCount = 0
-        for (neighborCoord in neighbors) {
-            val neighbor = chunks[neighborCoord] ?: return false
-            if (neighbor.status == ChunkStatus.LOCKED) continue
-            if (!neighbor.isSolved) return false
-            solvedCount++
-        }
-        return solvedCount > 0
-    }
-
-    /**
-     * Fallback: bounded flood-fill over HIDDEN cells starting at [start], walled by any
-     * REVEALED/FLAGGED/EXPLODED cell, strictly limited to the 3x3-chunk block (24x24 cells)
-     * centered on [homeChunk] — "limit the blast radius to 8 selectors". Escaping that window,
-     * or needing to expand into an absent/ungenerated chunk, fails closed (not proven enclosed),
-     * matching the fail-closed convention used elsewhere for missing chunk data.
-     */
-    private fun floodFillEnclosed(start: CellCoord, homeChunk: ChunkCoord): Boolean {
-        val minX = homeChunk.cx * CHUNK_SIDE_LENGTH - CHUNK_SIDE_LENGTH
-        val minY = homeChunk.cy * CHUNK_SIDE_LENGTH - CHUNK_SIDE_LENGTH
-        val maxX = minX + 3 * CHUNK_SIDE_LENGTH - 1
-        val maxY = minY + 3 * CHUNK_SIDE_LENGTH - 1
-
-        val visited = hashSetOf(start)
-        val queue = ArrayDeque<CellCoord>().apply { add(start) }
-        while (queue.isNotEmpty()) {
-            val cell = queue.removeFirst()
-            for (neighbor in neighbors8(cell)) {
-                if (neighbor.x !in minX..maxX || neighbor.y !in minY..maxY) return false
-                if (!visited.add(neighbor)) continue
-                val chunk = chunks[cellToChunk(neighbor)]
-                if (chunk == null || !chunk.generated) return false
-                if (chunk.cells[cellToLocalIndex(neighbor)].state == CellState.HIDDEN) {
-                    queue.add(neighbor)
-                }
-            }
-        }
-        return true
     }
 
     private suspend fun revealCascade(start: CellCoord, radiusOrigin: CellCoord = start) {

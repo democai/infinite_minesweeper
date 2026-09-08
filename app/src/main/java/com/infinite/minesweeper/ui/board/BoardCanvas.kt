@@ -121,7 +121,7 @@ fun ViewportBoardCanvas(
     viewportState: ViewportState,
     modifier: Modifier = Modifier,
     onTap: (CellCoord) -> Unit = {},
-    onLongPress: (CellCoord) -> Unit = {},
+    onLongPress: (CellCoord, Offset) -> Unit = { _, _ -> },
     longPressTimeoutMs: Long = LongPressDuration.Default.timeoutMs,
     onSolvedSelectorLongPress: (ChunkCoord, Offset) -> Unit = { _, _ -> },
     effect: BoardEffect? = null,
@@ -270,7 +270,7 @@ private fun Modifier.boardInputGestures(
     longPressTimeoutMs: Long,
     inputEnabled: Boolean,
     onTap: (CellCoord) -> Unit,
-    onLongPress: (CellCoord) -> Unit,
+    onLongPress: (CellCoord, Offset) -> Unit,
 ): Modifier = pointerInput(viewportState, longPressTimeoutMs, inputEnabled, onTap, onLongPress) {
     fun Offset.toCell(): CellCoord {
         val pixelsPerCell = BoardDimens.BaseCellSizeDp.dp.toPx() * viewportState.zoom
@@ -310,7 +310,7 @@ private fun Modifier.boardInputGestures(
             resolvedBeforeTimeout -> if (inputEnabled) onTap(down.position.toCell())
             else -> {
                 // Timed out while still down, within slop, single pointer → long-press.
-                if (inputEnabled) onLongPress(down.position.toCell())
+                if (inputEnabled) onLongPress(down.position.toCell(), down.position)
                 waitForUpOrCancellation()
             }
         }
@@ -322,10 +322,11 @@ private const val SELECTOR_LONG_PRESS_TIMEOUT_MS = 1000L
 /**
  * Fixed-1000ms long-press over a selector (chunk), independent of the user's configurable
  * cell-level long-press ([boardInputGestures]'s `longPressTimeoutMs`/`onLongPress`, which drives
- * flag-toggling). Only meaningful over a *solved* selector, but that check is left to the caller
- * ([onLongPress] receives the resolved [ChunkCoord] plus the raw screen position so the caller can
- * anchor a popup there): every cell in a solved chunk is already REVEALED/FLAGGED, so the existing
- * cell-level long-press is already a no-op there and the two detectors never fight over one tap.
+ * flag/reveal and the active-selector hint menu). Only meaningful over a *solved* selector, but
+ * that check is left to the caller ([onLongPress] receives the resolved [ChunkCoord] plus the raw
+ * screen position so the caller can anchor a popup there). Active selectors open their hint menu
+ * from the shorter cell-level long-press instead, so the two detectors do not compete for the
+ * same gesture on a solved chunk (hint policy refuses solved selectors).
  */
 private fun Modifier.boardSelectorLongPress(
     viewportState: ViewportState,
@@ -354,7 +355,7 @@ private fun Modifier.boardSelectorLongPress(
             }
         } == null
         if (!cancelled && timedOut) {
-            val pixelsPerCell = (BoardDimens.BaseCellSizeDp.dp.toPx() * viewportState.zoom).toDouble()
+            val pixelsPerCell = BoardDimens.BaseCellSizeDp.dp.toPx() * viewportState.zoom
             val coord = resolveChunkCoord(
                 position = down.position,
                 canvasWidth = size.width.toFloat(),
