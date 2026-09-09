@@ -6,6 +6,21 @@ interface ChunkRepository {
     suspend fun getChunks(coords: Set<ChunkCoord>): Map<ChunkCoord, Chunk>
 
     /**
+     * Returns only saved chunks inside an inclusive coordinate rectangle.
+     *
+     * Overview rendering uses this instead of expanding a large viewport into a set containing
+     * every possible coordinate (most of which have never been explored).
+     */
+    suspend fun getChunksInBounds(
+        minCx: Int,
+        minCy: Int,
+        maxCx: Int,
+        maxCy: Int,
+    ): Map<ChunkCoord, Chunk> = getAllChunks().filterKeys { coord ->
+        coord.cx in minCx..maxCx && coord.cy in minCy..maxCy
+    }
+
+    /**
      * Every chunk currently [ChunkStatus.LOCKED]. Used on cold start so surrounded locks outside
      * the viewport window can still soft-resolve without waiting for the player to pan back.
      */

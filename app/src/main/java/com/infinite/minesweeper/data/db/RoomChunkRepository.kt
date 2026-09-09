@@ -91,6 +91,27 @@ class RoomChunkRepository(
         return result
     }
 
+    override suspend fun getChunksInBounds(
+        minCx: Int,
+        minCy: Int,
+        maxCx: Int,
+        maxCy: Int,
+    ): Map<ChunkCoord, Chunk> {
+        val fromPending = queueMutex.withLock {
+            pendingChunks.filterKeys { coord ->
+                coord.cx in minCx..maxCx && coord.cy in minCy..maxCy
+            }.toMap()
+        }
+        val fromDb = withContext(ioDispatcher) {
+            chunkDao.getChunksInBounds(minCx, minCy, maxCx, maxCy)
+                .asSequence()
+                .map(ChunkMapper::toDomain)
+                .filter { it.coord !in fromPending }
+                .associateBy { it.coord }
+        }
+        return fromDb + fromPending
+    }
+
     override suspend fun getLockedChunks(): Map<ChunkCoord, Chunk> {
         val fromPending = queueMutex.withLock {
             pendingChunks.values.filter { it.status == ChunkStatus.LOCKED }.associateBy { it.coord }

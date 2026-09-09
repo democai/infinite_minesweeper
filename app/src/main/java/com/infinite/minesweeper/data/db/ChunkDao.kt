@@ -22,6 +22,20 @@ interface ChunkDao {
     )
     suspend fun getChunksWhereCxCyIn(cxs: List<Int>, cys: List<Int>): List<ChunkEntity>
 
+    @Query(
+        """
+        SELECT * FROM chunks
+        WHERE cx BETWEEN :minCx AND :maxCx
+          AND cy BETWEEN :minCy AND :maxCy
+        """,
+    )
+    suspend fun getChunksInBounds(
+        minCx: Int,
+        minCy: Int,
+        maxCx: Int,
+        maxCy: Int,
+    ): List<ChunkEntity>
+
     @Query("SELECT * FROM chunks WHERE status = :status")
     suspend fun getChunksByStatus(status: ChunkStatus): List<ChunkEntity>
 

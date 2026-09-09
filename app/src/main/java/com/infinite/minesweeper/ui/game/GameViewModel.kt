@@ -26,6 +26,7 @@ import com.infinite.minesweeper.ui.settings.InputActionMapper
 import com.infinite.minesweeper.ui.settings.InputBinding
 import com.infinite.minesweeper.ui.settings.InputBindingPreferences
 import com.infinite.minesweeper.ui.settings.TapKind
+import com.infinite.minesweeper.ui.board.ChunkBounds
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -69,6 +70,7 @@ class GameViewModel @Inject constructor(
      * so [resetGame] / [importSave] can stop exactly those (and only those) before wiping durable
      * storage. */
     private var sessionJob: Job? = null
+    private var viewportSyncJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -268,7 +270,8 @@ class GameViewModel @Inject constructor(
      */
     fun syncVisibleWindow(keep: Set<ChunkCoord>) {
         val activeEngine = engine ?: return
-        viewModelScope.launch {
+        viewportSyncJob?.cancel()
+        viewportSyncJob = viewModelScope.launch {
             val currentChunks = activeEngine.state.value.chunks
             val persistedLocks = repository.getLockedChunks()
             val locked = currentChunks.filterValues { it.status == ChunkStatus.LOCKED }.keys +
@@ -291,6 +294,40 @@ class GameViewModel @Inject constructor(
                 if (stillMissing.isNotEmpty()) putAll(repository.getChunks(stillMissing))
             }
             activeEngine.syncWindow(effectiveKeep, hydrated)
+        }
+    }
+
+    /**
+     * Loads an overview rectangle by querying saved rows in that rectangle. Empty world space is
+     * never expanded into millions of [ChunkCoord] objects, and gameplay-only repair is deferred
+     * until the user zooms back into the interactive detail renderer.
+     */
+    fun syncOverviewWindow(bounds: ChunkBounds) {
+        val activeEngine = engine ?: return
+        viewportSyncJob?.cancel()
+        viewportSyncJob = viewModelScope.launch {
+            val persisted = repository.getChunksInBounds(
+                minCx = bounds.minCx,
+                minCy = bounds.minCy,
+                maxCx = bounds.maxCx,
+                maxCy = bounds.maxCy,
+            )
+            val currentChunks = activeEngine.state.value.chunks
+            val visibleCurrent = currentChunks.filterKeys { it in bounds }
+            val locked = currentChunks.filterValues { it.status == ChunkStatus.LOCKED }.keys
+            val lockHalo = buildSet {
+                for (coord in locked) {
+                    add(coord)
+                    addAll(neighboringChunkCoords(coord))
+                }
+            }
+            val hydrated = persisted + visibleCurrent
+            val keep = hydrated.keys + lockHalo
+            val evicted = currentChunks.keys - keep
+            if (evicted.isNotEmpty()) {
+                repository.saveChunks(evicted.mapNotNull { currentChunks[it] })
+            }
+            activeEngine.syncOverviewWindow(keep = keep, hydrated = hydrated)
         }
     }
 

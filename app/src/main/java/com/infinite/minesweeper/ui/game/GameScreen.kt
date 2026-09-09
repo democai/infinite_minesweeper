@@ -39,6 +39,7 @@ import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.ui.board.BoardEffect
 import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
+import com.infinite.minesweeper.ui.board.LodRenderer
 import com.infinite.minesweeper.ui.board.computeMinZoomFromExploredBounds
 import com.infinite.minesweeper.ui.board.rememberViewportState
 import com.infinite.minesweeper.ui.hud.GameHud
@@ -49,7 +50,6 @@ import com.infinite.minesweeper.ui.theme.BoardDimens
 import com.infinite.minesweeper.ui.theme.BoardPalette
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 
 @Composable
@@ -84,15 +84,24 @@ fun GameScreen(
     val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
     LaunchedEffect(viewportState, baseCellSizePx) {
         snapshotFlow {
-            viewportState.visibleChunkBounds(
+            val bounds = viewportState.visibleChunkBounds(
                 baseCellSizePx = baseCellSizePx,
                 renderMarginChunks = DEFAULT_RETENTION_MARGIN_CHUNKS,
             )
+            bounds?.let {
+                val cellSizeDp = BoardDimens.BaseCellSizeDp * viewportState.zoom.toFloat()
+                it to LodRenderer.shouldUseLod(cellSizeDp)
+            }
         }
             .filterNotNull()
-            .map { it.toSet() }
             .distinctUntilChanged()
-            .collect { window -> viewModel.syncVisibleWindow(window) }
+            .collect { (bounds, useLod) ->
+                if (useLod) {
+                    viewModel.syncOverviewWindow(bounds)
+                } else {
+                    viewModel.syncVisibleWindow(bounds.toSet())
+                }
+            }
     }
     val viewportWidthPx = viewportState.viewportWidthPx
     val viewportHeightPx = viewportState.viewportHeightPx

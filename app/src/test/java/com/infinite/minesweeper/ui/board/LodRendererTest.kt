@@ -31,6 +31,16 @@ class LodRendererTest {
     }
 
     @Test
+    fun tileCoord_usesFloorDivisionAcrossWorldOrigin() {
+        fun chunk(cx: Int, cy: Int) = Chunk(coord = ChunkCoord(cx, cy))
+
+        assertEquals(LodRenderer.TileCoord(0, 0), LodRenderer.tileCoord(chunk(0, 15)))
+        assertEquals(LodRenderer.TileCoord(1, 0), LodRenderer.tileCoord(chunk(16, 0)))
+        assertEquals(LodRenderer.TileCoord(-1, -1), LodRenderer.tileCoord(chunk(-1, -16)))
+        assertEquals(LodRenderer.TileCoord(-2, -2), LodRenderer.tileCoord(chunk(-17, -17)))
+    }
+
+    @Test
     fun bake_perCellPalette_hiddenRevealedFlagged() {
         val cells = MutableList(CELLS_PER_CHUNK) { Cell(state = CellState.HIDDEN) }
         cells[0] = Cell(state = CellState.HIDDEN, isMine = true)

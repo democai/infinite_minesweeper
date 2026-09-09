@@ -29,6 +29,15 @@ import kotlin.math.roundToInt
  */
 object LodRenderer {
     val bitmapSide: Int = CHUNK_SIDE_LENGTH
+    const val TILE_SIDE_CHUNKS: Int = 16
+    const val TILE_SIDE_PIXELS: Int = TILE_SIDE_CHUNKS * CHUNK_SIDE_LENGTH
+
+    data class TileCoord(val tx: Int, val ty: Int)
+
+    data class TileBitmap(
+        val coord: TileCoord,
+        val bitmap: ImageBitmap,
+    )
 
     private val hiddenArgb: Int = LodPalette.Hidden.toArgb()
     private val revealedArgb: Int = LodPalette.Revealed.toArgb()
@@ -88,6 +97,45 @@ object LodRenderer {
         return androidBitmap.asImageBitmap()
     }
 
+    fun tileCoord(chunk: Chunk): TileCoord = TileCoord(
+        tx = Math.floorDiv(chunk.coord.cx, TILE_SIDE_CHUNKS),
+        ty = Math.floorDiv(chunk.coord.cy, TILE_SIDE_CHUNKS),
+    )
+
+    /**
+     * Bakes many selectors into one bitmap so overview rendering needs one allocation and draw
+     * call per tile rather than one of each per selector. Unoccupied tile pixels are transparent.
+     */
+    fun bakeTile(coord: TileCoord, chunks: List<Chunk>): TileBitmap {
+        val tilePixels = IntArray(TILE_SIDE_PIXELS * TILE_SIDE_PIXELS)
+        val chunkPixels = IntArray(CELLS_PER_CHUNK)
+        val originCx = coord.tx * TILE_SIDE_CHUNKS
+        val originCy = coord.ty * TILE_SIDE_CHUNKS
+        for (chunk in chunks) {
+            require(tileCoord(chunk) == coord) { "Chunk ${chunk.coord} is outside tile $coord" }
+            bakeArgbPixelsInto(chunk, chunkPixels)
+            val pixelX = (chunk.coord.cx - originCx) * CHUNK_SIDE_LENGTH
+            val pixelY = (chunk.coord.cy - originCy) * CHUNK_SIDE_LENGTH
+            for (row in 0 until CHUNK_SIDE_LENGTH) {
+                chunkPixels.copyInto(
+                    destination = tilePixels,
+                    destinationOffset = (pixelY + row) * TILE_SIDE_PIXELS + pixelX,
+                    startIndex = row * CHUNK_SIDE_LENGTH,
+                    endIndex = (row + 1) * CHUNK_SIDE_LENGTH,
+                )
+            }
+        }
+        return TileBitmap(
+            coord = coord,
+            bitmap = Bitmap.createBitmap(
+                tilePixels,
+                TILE_SIDE_PIXELS,
+                TILE_SIDE_PIXELS,
+                Bitmap.Config.ARGB_8888,
+            ).asImageBitmap(),
+        )
+    }
+
     /**
      * Returns the cached LOD bitmap for [chunk], baking and storing one when absent.
      * Callers must serialize cache access on one coroutine context (see [ChunkCache]).
@@ -113,6 +161,23 @@ object LodRenderer {
             image = bitmap,
             srcOffset = IntOffset.Zero,
             srcSize = IntSize(bitmap.width, bitmap.height),
+            dstOffset = IntOffset(left.roundToInt(), top.roundToInt()),
+            dstSize = IntSize(dstSizePx, dstSizePx),
+            filterQuality = FilterQuality.None,
+        )
+    }
+
+    fun DrawScope.drawLodTile(
+        tile: TileBitmap,
+        left: Float,
+        top: Float,
+        sizePx: Float,
+    ) {
+        val dstSizePx = sizePx.roundToInt().coerceAtLeast(1)
+        drawImage(
+            image = tile.bitmap,
+            srcOffset = IntOffset.Zero,
+            srcSize = IntSize(tile.bitmap.width, tile.bitmap.height),
             dstOffset = IntOffset(left.roundToInt(), top.roundToInt()),
             dstSize = IntSize(dstSizePx, dstSizePx),
             filterQuality = FilterQuality.None,

@@ -117,6 +117,24 @@ class DefaultGameEngine(
     }
 
     /**
+     * Lightweight state sync for the non-interactive overview. It deliberately skips adjacency
+     * repair and lock evaluation: those gameplay operations are unnecessary while cells cannot
+     * be acted on, and the normal detail-window sync performs them before input is enabled again.
+     */
+    suspend fun syncOverviewWindow(
+        keep: Set<ChunkCoord>,
+        hydrated: Map<ChunkCoord, Chunk> = emptyMap(),
+    ) {
+        dispatchMutex.withLock {
+            val current = _state.value
+            val chunks = current.chunks.filterKeys { it in keep } + hydrated
+            var meta = current.meta
+            for (coord in chunks.keys) meta = meta.expandExplored(coord)
+            _state.value = current.copy(chunks = chunks, meta = meta)
+        }
+    }
+
+    /**
      * Ensures every chunk that already has explored cells also has its 8 neighbors generated and
      * adjacency patched, then returns the updated state. Used on restore and viewport hydrate so
      * wrong border numbers never reach the UI.

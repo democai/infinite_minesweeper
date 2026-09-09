@@ -13,10 +13,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextLayoutResult
@@ -152,16 +153,21 @@ fun ViewportBoardCanvas(
             numberLayouts = numberLayouts,
         )
     }
-    val lodBitmaps = remember { mutableMapOf<ChunkCoord, Pair<Chunk, ImageBitmap>>() }
-    val visibleCoordinates = visibleChunks.mapTo(hashSetOf()) { it.coord }
-    lodBitmaps.keys.retainAll(visibleCoordinates)
     val useLod = LodRenderer.shouldUseLod(cellSize.value)
+    val lodTiles = remember { mutableMapOf<LodRenderer.TileCoord, Pair<List<Chunk>, LodRenderer.TileBitmap>>() }
     if (useLod) {
-        visibleChunks.forEach { chunk ->
-            if (lodBitmaps[chunk.coord]?.first != chunk) {
-                lodBitmaps[chunk.coord] = chunk to LodRenderer.bakeImageBitmap(chunk)
+        val chunksByTile = visibleChunks.groupBy(LodRenderer::tileCoord)
+        lodTiles.keys.retainAll(chunksByTile.keys)
+        chunksByTile.forEach { (tileCoord, tileChunks) ->
+            if (lodTiles[tileCoord]?.first != tileChunks) {
+                lodTiles[tileCoord] = tileChunks to LodRenderer.bakeTile(tileCoord, tileChunks)
             }
         }
+    } else {
+        lodTiles.clear()
+    }
+    val lodOutlineGeometry = remember(visibleChunks, useLod) {
+        if (useLod) buildLodOutlineGeometry(visibleChunks) else null
     }
 
     Canvas(
@@ -183,25 +189,61 @@ fun ViewportBoardCanvas(
     ) {
         val screenCenterX = size.width * 0.5f
         val screenCenterY = size.height * 0.5f
-        for (chunkIndex in visibleChunks.indices) {
-            val chunk = visibleChunks[chunkIndex]
-            val chunkLeft = screenCenterX +
-                ((chunk.coord.cx.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerX) * cellSizePx).toFloat()
-            val chunkTop = screenCenterY +
-                ((chunk.coord.cy.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerY) * cellSizePx).toFloat()
-            val chunkSizePx = CHUNK_SIDE_LENGTH * cellSizePx
-            if (useLod) {
-                lodBitmaps[chunk.coord]?.second?.let { bitmap ->
-                    with(LodRenderer) {
-                        drawLodChunk(
-                            bitmap = bitmap,
-                            left = chunkLeft,
-                            top = chunkTop,
-                            sizePx = chunkSizePx,
-                        )
-                    }
+        if (useLod) {
+            val tileSizeCells = LodRenderer.TILE_SIDE_PIXELS
+            val tileSizePx = tileSizeCells * cellSizePx
+            for ((_, cached) in lodTiles) {
+                val tile = cached.second
+                val tileWorldX = tile.coord.tx.toDouble() * tileSizeCells
+                val tileWorldY = tile.coord.ty.toDouble() * tileSizeCells
+                val tileLeft = screenCenterX +
+                    ((tileWorldX - viewportState.centerX) * cellSizePx).toFloat()
+                val tileTop = screenCenterY +
+                    ((tileWorldY - viewportState.centerY) * cellSizePx).toFloat()
+                with(LodRenderer) {
+                    drawLodTile(tile = tile, left = tileLeft, top = tileTop, sizePx = tileSizePx)
                 }
-            } else {
+            }
+            lodOutlineGeometry?.let { geometry ->
+                val anchorWorldX = geometry.anchor.cx.toDouble() * CHUNK_SIDE_LENGTH
+                val anchorWorldY = geometry.anchor.cy.toDouble() * CHUNK_SIDE_LENGTH
+                val anchorLeft = screenCenterX +
+                    ((anchorWorldX - viewportState.centerX) * cellSizePx).toFloat()
+                val anchorTop = screenCenterY +
+                    ((anchorWorldY - viewportState.centerY) * cellSizePx).toFloat()
+                withTransform({
+                    translate(left = anchorLeft, top = anchorTop)
+                    scale(scaleX = cellSizePx, scaleY = cellSizePx, pivot = Offset.Zero)
+                }) {
+                    drawPath(
+                        path = geometry.path,
+                        color = BoardPalette.ChunkOutline,
+                        style = Stroke(width = chunkOutlineStrokePx / cellSizePx),
+                    )
+                }
+            }
+            effect?.takeIf { it.alpha > 0f }?.let { activeEffect ->
+                if (visibleChunks.any { it.coord == activeEffect.chunk }) {
+                    val chunkLeft = screenCenterX +
+                        ((activeEffect.chunk.cx.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerX) * cellSizePx).toFloat()
+                    val chunkTop = screenCenterY +
+                        ((activeEffect.chunk.cy.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerY) * cellSizePx).toFloat()
+                    drawRect(
+                        color = activeEffect.color,
+                        topLeft = Offset(chunkLeft, chunkTop),
+                        size = Size(CHUNK_SIDE_LENGTH * cellSizePx, CHUNK_SIDE_LENGTH * cellSizePx),
+                        alpha = activeEffect.alpha,
+                    )
+                }
+            }
+        } else {
+            for (chunkIndex in visibleChunks.indices) {
+                val chunk = visibleChunks[chunkIndex]
+                val chunkLeft = screenCenterX +
+                    ((chunk.coord.cx.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerX) * cellSizePx).toFloat()
+                val chunkTop = screenCenterY +
+                    ((chunk.coord.cy.toDouble() * CHUNK_SIDE_LENGTH - viewportState.centerY) * cellSizePx).toFloat()
+                val chunkSizePx = CHUNK_SIDE_LENGTH * cellSizePx
                 drawViewportChunk(
                     chunk = chunk,
                     viewportCenterX = viewportState.centerX,
@@ -219,21 +261,21 @@ fun ViewportBoardCanvas(
                         size = Size(chunkSizePx, chunkSizePx),
                     )
                 }
-            }
-            if (effect?.chunk == chunk.coord && effect.alpha > 0f) {
-                drawRect(
-                    color = effect.color,
-                    topLeft = Offset(chunkLeft, chunkTop),
-                    size = Size(chunkSizePx, chunkSizePx),
-                    alpha = effect.alpha,
+                if (effect?.chunk == chunk.coord && effect.alpha > 0f) {
+                    drawRect(
+                        color = effect.color,
+                        topLeft = Offset(chunkLeft, chunkTop),
+                        size = Size(chunkSizePx, chunkSizePx),
+                        alpha = effect.alpha,
+                    )
+                }
+                drawChunkOutline(
+                    left = chunkLeft,
+                    top = chunkTop,
+                    sizePx = chunkSizePx,
+                    strokePx = chunkOutlineStrokePx,
                 )
             }
-            drawChunkOutline(
-                left = chunkLeft,
-                top = chunkTop,
-                sizePx = chunkSizePx,
-                strokePx = chunkOutlineStrokePx,
-            )
         }
         if (useLod) {
             val markerSizePx = (BoardDimens.HomeMarkerSizeCells * cellSizePx).coerceIn(
@@ -249,6 +291,23 @@ fun ViewportBoardCanvas(
             drawHomeMarker(centerX = markerCenterX, centerY = markerCenterY, sizePx = markerSizePx)
         }
     }
+}
+
+private data class LodOutlineGeometry(
+    val anchor: ChunkCoord,
+    val path: Path,
+)
+
+private fun buildLodOutlineGeometry(chunks: List<Chunk>): LodOutlineGeometry? {
+    if (chunks.isEmpty()) return null
+    val anchor = chunks.first().coord
+    val path = Path()
+    for (chunk in chunks) {
+        val left = (chunk.coord.cx.toLong() - anchor.cx.toLong()).toFloat() * CHUNK_SIDE_LENGTH
+        val top = (chunk.coord.cy.toLong() - anchor.cy.toLong()).toFloat() * CHUNK_SIDE_LENGTH
+        path.addRect(Rect(left, top, left + CHUNK_SIDE_LENGTH, top + CHUNK_SIDE_LENGTH))
+    }
+    return LodOutlineGeometry(anchor, path)
 }
 
 data class BoardEffect(
