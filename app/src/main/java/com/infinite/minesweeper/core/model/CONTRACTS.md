@@ -29,8 +29,13 @@ renderers consume immutable `GameState` snapshots.
 ## Ownership and mutability
 
 - `Chunk`, `Cell`, `GameMeta`, and `GameState` are immutable values. Implementations publish new
-  values rather than mutating lists or maps retained by callers.
+  values rather than mutating lists or maps retained by callers. In particular, mid-cascade
+  `GameState` publications must snapshot the chunk map (`toMap()`), never share the session's
+  mutable working map — otherwise a concurrent flush can persist board cells that are ahead of
+  the paired `GameMeta` counters.
 - `GameState.chunks` is the hydrated cache/window, not every saved chunk.
+- `GameMeta.flagsPlaced` / `selectorsCleared` are board-grounded (flagged cells / currently solved
+  selectors). Cold start, export, and flush recount from durable chunks when meta has drifted.
 - A `GenerationResult` contains every chunk changed by generation, including adjacency-only
   changes to neighbors. Callers must merge the full result.
 - `GameEngine.events` carries one-shot transitions. Long-lived truth always lives in `state`.

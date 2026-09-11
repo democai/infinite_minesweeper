@@ -19,6 +19,7 @@ import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
 import com.infinite.minesweeper.core.model.MineGenerator
+import com.infinite.minesweeper.core.model.withRecountedProgress
 import kotlin.random.Random
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -74,6 +75,24 @@ class DefaultGameEngine(
      */
     @Volatile
     var limitCascadeToSelector: Boolean = false
+
+    /**
+     * Replaces FLAGS / CLEARED with a recount over [durableChunks] merged under the live window
+     * (live wins on conflict). Used after flush/export heal so a drifted [GameMeta] cannot stick
+     * in the HUD until the next cold start.
+     */
+    suspend fun reconcileProgress(durableChunks: Map<ChunkCoord, Chunk>) {
+        dispatchMutex.withLock {
+            val current = _state.value
+            val merged = buildMap {
+                putAll(durableChunks)
+                putAll(current.chunks)
+            }
+            val meta = current.meta.withRecountedProgress(merged.values)
+            if (meta == current.meta) return
+            _state.value = current.copy(meta = meta)
+        }
+    }
 
     /**
      * Bounds the live [state] chunk map to [keep], folding in [hydrated] for any newly retained
@@ -185,7 +204,13 @@ class DefaultGameEngine(
                     loadChunks = loadChunks,
                     random = random,
                     publish = { chunks, meta ->
-                        _state.value = GameState(chunks = chunks, meta = meta, isProcessing = true)
+                        // Defensive copy: session keeps mutating its map between batch publishes.
+                        // Sharing that reference lets flush/persistence observe chunks ahead of meta.
+                        _state.value = GameState(
+                            chunks = chunks.toMap(),
+                            meta = meta,
+                            isProcessing = true,
+                        )
                     },
                     emit = { event -> pendingEvents += event },
                 )
@@ -225,7 +250,11 @@ class DefaultGameEngine(
                     loadChunks = loadChunks,
                     random = random,
                     publish = { chunks, meta ->
-                        _state.value = GameState(chunks = chunks, meta = meta, isProcessing = true)
+                        _state.value = GameState(
+                            chunks = chunks.toMap(),
+                            meta = meta,
+                            isProcessing = true,
+                        )
                     },
                     emit = { event -> pendingEvents += event },
                 )
@@ -288,6 +317,8 @@ class DefaultGameEngine(
                 }
                 var meta = snapshot.meta.copy(
                     flagsPlaced = (snapshot.meta.flagsPlaced - oldFlagCount).coerceAtLeast(0),
+                    // HUD CLEARED is current solved selectors, not a lifetime clear counter.
+                    selectorsCleared = (snapshot.meta.selectorsCleared - 1).coerceAtLeast(0),
                 )
                 for (chunkCoord in chunks.keys) {
                     meta = meta.expandExplored(chunkCoord)
@@ -317,6 +348,8 @@ private class EngineSession(
     private val emit: suspend (GameEvent) -> Unit,
 ) {
     private var unpublishedReveals = 0
+    /** Selectors that emitted [GameEvent.ChunkCleared] during this dispatch — blocks double-count. */
+    private val clearedThisSession = hashSetOf<ChunkCoord>()
 
     private fun putChunk(coord: ChunkCoord, chunk: Chunk) {
         chunks[coord] = chunk
@@ -549,19 +582,19 @@ private class EngineSession(
         }
         val completed = chunk.copy(cells = updatedCells)
         if (!completed.isSolved) return
-
-        putChunk(coord, completed)
-        meta = meta.copy(
-            flagsPlaced = meta.flagsPlaced + newlyFlagged,
-            selectorsCleared = meta.selectorsCleared + 1,
-        )
-        emit(GameEvent.ChunkCleared(coord))
+        if (newlyFlagged > 0) {
+            putChunk(coord, completed)
+        }
+        markCleared(coord, newlyFlagged)
     }
 
     /**
      * When every mine in the selector is flagged and no non-mine is flagged, the remaining hidden
      * safe cells are revealed and the selector is marked cleared. Uses ground-truth [Cell.isMine]
      * so a perfect flag set auto-solves the chunk without forcing the player to chord every number.
+     *
+     * When every safe cell is already revealed and the last mine was just flagged, there is nothing
+     * left to cascade — still emit [GameEvent.ChunkCleared] so CLEARED stays in sync.
      */
     private suspend fun maybeCompleteFromPerfectFlags(coord: ChunkCoord) {
         val chunk = chunks[coord] ?: return
@@ -583,17 +616,32 @@ private class EngineSession(
                 }
             }
         }
-        if (mineCount == 0 || flaggedNonMines > 0 || flaggedMines != mineCount || hiddenSafe == 0) {
+        if (mineCount == 0 || flaggedNonMines > 0 || flaggedMines != mineCount) {
+            return
+        }
+        if (hiddenSafe > 0) {
+            for (index in chunk.cells.indices) {
+                val cell = chunks.getValue(coord).cells[index]
+                if (cell.state == CellState.HIDDEN && !cell.isMine) {
+                    val world = chunkLocalToCell(coord, localIndexToCoord(index))
+                    revealCascade(start = world, radiusOrigin = world)
+                }
+            }
             return
         }
 
-        for (index in chunk.cells.indices) {
-            val cell = chunks.getValue(coord).cells[index]
-            if (cell.state == CellState.HIDDEN && !cell.isMine) {
-                val world = chunkLocalToCell(coord, localIndexToCoord(index))
-                revealCascade(start = world, radiusOrigin = world)
-            }
-        }
+        // All safes already revealed; the flag that just landed completed the selector.
+        if (!chunk.isSolved) return
+        markCleared(coord, newlyFlagged = 0)
+    }
+
+    private suspend fun markCleared(coord: ChunkCoord, newlyFlagged: Int) {
+        if (!clearedThisSession.add(coord)) return
+        meta = meta.copy(
+            flagsPlaced = meta.flagsPlaced + newlyFlagged,
+            selectorsCleared = meta.selectorsCleared + 1,
+        )
+        emit(GameEvent.ChunkCleared(coord))
     }
 
     private suspend fun ensureGenerated(cell: CellCoord) {
@@ -732,7 +780,8 @@ private class EngineSession(
         chunks[cellToChunk(cell)]?.status == ChunkStatus.LOCKED
 
     private suspend fun publishNow() {
-        publish(chunks, meta)
+        // Snapshot before yielding to collectors — see publish lambda in dispatch/hint.
+        publish(chunks.toMap(), meta)
         unpublishedReveals = 0
     }
 }

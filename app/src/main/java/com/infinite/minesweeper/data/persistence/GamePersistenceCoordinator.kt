@@ -60,7 +60,8 @@ class GamePersistenceCoordinator(
         }
         if (dirty.isEmpty()) return
         repository.saveChunks(dirty.values)
-        lastPersistedChunks = chunks
+        // Copy so later mutations to a shared engine map cannot alias into this snapshot.
+        lastPersistedChunks = HashMap(chunks)
     }
 
     private suspend fun persistMetaIfChanged(meta: GameMeta, viewportSnapshot: ViewportSnapshot) {

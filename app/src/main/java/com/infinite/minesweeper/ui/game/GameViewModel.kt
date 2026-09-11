@@ -17,6 +17,7 @@ import com.infinite.minesweeper.core.model.ChunkStatus
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
+import com.infinite.minesweeper.core.model.withRecountedProgress
 import com.infinite.minesweeper.data.persistence.GamePersistenceCoordinator
 import com.infinite.minesweeper.data.persistence.GameSaveCodec
 import com.infinite.minesweeper.data.persistence.ViewportSnapshot
@@ -145,8 +146,11 @@ class GameViewModel @Inject constructor(
     suspend fun exportSave(): ByteArray = flushMutex.withLock {
         withContext(NonCancellable) {
             persistLiveWorkingSet()
-            val meta = repository.getGameMeta() ?: GameMeta()
             val chunks = repository.getAllChunks()
+            val meta = (repository.getGameMeta() ?: GameMeta())
+                .withRecountedProgress(chunks.values)
+            repository.saveGameMeta(meta)
+            repository.flush()
             GameSaveCodec.encode(
                 GameSaveCodec.Snapshot(
                     worldSeed = WORLD_SEED,
@@ -356,14 +360,17 @@ class GameViewModel @Inject constructor(
         val snapshot = _state.value
         val viewportSnapshot = viewport.value
         repository.saveChunks(snapshot.chunks.values)
-        repository.saveGameMeta(
-            snapshot.meta.copy(
+        val durable = repository.getAllChunks()
+        val meta = snapshot.meta
+            .copy(
                 viewportX = viewportSnapshot.centerX,
                 viewportY = viewportSnapshot.centerY,
                 zoom = viewportSnapshot.zoom,
-            ),
-        )
+            )
+            .withRecountedProgress(durable.values)
+        repository.saveGameMeta(meta)
         repository.flush()
+        engine?.reconcileProgress(durable)
     }
 }
 

@@ -12,6 +12,7 @@ import com.infinite.minesweeper.core.model.GameAction
 import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GenerationResult
 import com.infinite.minesweeper.core.model.MineGenerator
+import com.infinite.minesweeper.core.model.withRecountedProgress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -56,7 +57,11 @@ class GameStateRestoreTest {
             windowRadiusChunks = 1,
         )
 
-        assertEquals(store.meta, restored.meta)
+        // FLAGS/CLEARED are healed from the board (sample chunks have no flags/clears).
+        assertEquals(
+            store.meta!!.copy(flagsPlaced = 0, selectorsCleared = 0),
+            restored.meta,
+        )
         assertEquals(9, restored.chunks.size)
         assertFalse(restored.chunks.containsKey(farAway))
         for (dcx in -1..1) {
@@ -64,6 +69,42 @@ class GameStateRestoreTest {
                 assertTrue(restored.chunks.containsKey(ChunkCoord(center.cx + dcx, center.cy + dcy)))
             }
         }
+    }
+
+    @Test
+    fun restore_healsFlagsAndClearedWhenMetaLagsBoard() = runTest {
+        val store = InMemoryChunkRepository.DurableStore()
+        // Meta claims almost no progress; durable board has a fully solved selector.
+        store.meta = GameMeta(
+            viewportX = 4f,
+            viewportY = 4f,
+            zoom = 1f,
+            flagsPlaced = 1,
+            selectorsCleared = 0,
+            hasEverRevealed = true,
+        )
+        store.chunks[ChunkCoord(0, 0)] = Chunk(
+            coord = ChunkCoord(0, 0),
+            generated = true,
+            cells = List(64) { index ->
+                if (index < 5) {
+                    Cell(state = CellState.FLAGGED, isMine = true)
+                } else {
+                    Cell(state = CellState.REVEALED)
+                }
+            },
+        )
+
+        val restored = restoreGameState(
+            InMemoryChunkRepository(store),
+            MineFreeGenerator(),
+            windowRadiusChunks = 1,
+        )
+
+        assertEquals(5, restored.meta.flagsPlaced)
+        assertEquals(1, restored.meta.selectorsCleared)
+        assertEquals(5, store.meta!!.flagsPlaced)
+        assertEquals(1, store.meta!!.selectorsCleared)
     }
 
     @Test
@@ -119,7 +160,9 @@ class GameStateRestoreTest {
         val restored = restoreGameState(coldRepository, MineFreeGenerator(), windowRadiusChunks = 5)
 
         assertEquals(
-            liveState.meta.copy(viewportX = 4f, viewportY = 4f, zoom = 1.5f),
+            liveState.meta
+                .copy(viewportX = 4f, viewportY = 4f, zoom = 1.5f)
+                .withRecountedProgress(liveState.chunks.values),
             restored.meta,
         )
         assertEquals(liveState.chunks, restored.chunks)

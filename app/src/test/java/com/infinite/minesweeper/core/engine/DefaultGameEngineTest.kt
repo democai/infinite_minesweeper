@@ -338,6 +338,31 @@ class DefaultGameEngineTest {
     }
 
     @Test
+    fun flaggingLastMineWhenAllSafesAlreadyRevealedClearsSelector() = runTest {
+        var chunk = chunkWithMines(ChunkCoord(0, 0), setOf(7 to 7))
+        for (y in 0..7) {
+            for (x in 0..7) {
+                if (x == 7 && y == 7) continue
+                chunk = chunk.withState(x, y, CellState.REVEALED)
+            }
+        }
+        // Seed a revealed neighbor so ToggleFlag on the mine satisfies the playable-cell rule.
+        val engine = engineWithChunk(chunk, cascadeRadiusChunks = 0)
+        val events = mutableListOf<GameEvent>()
+        val collector = launch(Dispatchers.Unconfined) { engine.events.collect { events += it } }
+
+        engine.dispatch(GameAction.ToggleFlag(CellCoord(7, 7)))
+        collector.cancel()
+
+        val result = engine.state.value.chunks.getValue(ChunkCoord(0, 0))
+        assertTrue(result.isSolved)
+        assertEquals(CellState.FLAGGED, stateAt(result, 7, 7))
+        assertEquals(1, engine.state.value.meta.flagsPlaced)
+        assertEquals(1, engine.state.value.meta.selectorsCleared)
+        assertEquals(listOf(GameEvent.ChunkCleared(ChunkCoord(0, 0))), events)
+    }
+
+    @Test
     fun revealOnFreshBoardIsExemptFromAdjacencyRule() = runTest {
         val chunk = chunkWithMines(ChunkCoord(0, 0), emptySet())
         val engine = engineWithChunk(chunk, cascadeRadiusChunks = 0)
@@ -738,7 +763,7 @@ class DefaultGameEngineTest {
         assertFalse(result.everSurrounded)
         assertEquals(0, engine.state.value.meta.flagsPlaced)
         assertEquals(0, engine.state.value.meta.selectorsWiped)
-        assertEquals(1, engine.state.value.meta.selectorsCleared)
+        assertEquals(0, engine.state.value.meta.selectorsCleared)
         assertEquals(listOf(GameEvent.ChunkWiped(center)), events)
     }
 

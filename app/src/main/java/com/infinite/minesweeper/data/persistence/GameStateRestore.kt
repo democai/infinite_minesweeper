@@ -11,6 +11,7 @@ import com.infinite.minesweeper.core.model.ChunkRepository
 import com.infinite.minesweeper.core.model.GameMeta
 import com.infinite.minesweeper.core.model.GameState
 import com.infinite.minesweeper.core.model.MineGenerator
+import com.infinite.minesweeper.core.model.withRecountedProgress
 import kotlin.math.roundToInt
 
 const val DEFAULT_RESTORE_WINDOW_RADIUS_CHUNKS: Int = 2
@@ -28,6 +29,9 @@ const val DEFAULT_RESTORE_WINDOW_RADIUS_CHUNKS: Int = 2
  * Chunks with already-explored cells also get their outer neighbor ring generated before the
  * restored state is returned, so border numbers are not provisional zeros that jump when the
  * player later opens adjacent terra.
+ *
+ * FLAGS / CLEARED are reconciled from every durable chunk so a prior mid-cascade flush that
+ * persisted board progress ahead of [GameMeta] cannot leave the HUD permanently low.
  */
 suspend fun restoreGameState(
     repository: ChunkRepository,
@@ -61,13 +65,20 @@ suspend fun restoreGameState(
     val seeded = GameState(chunks = working, meta = meta)
     val resolved = LockAndWipeMechanic(mineGenerator).recheckSurroundedLocks(seeded)
     val chunksChanged = resolved.state.chunks != seeded.chunks || repaired
-    val metaChanged = resolved.state.meta != seeded.meta
+
+    // Prefer post-resolve window mutations over the durable snapshot for the same coord.
+    val durableForRecount = buildMap {
+        putAll(repository.getAllChunks())
+        putAll(resolved.state.chunks)
+    }
+    val reconciledMeta = resolved.state.meta.withRecountedProgress(durableForRecount.values)
+    val metaChanged = reconciledMeta != meta
     if (chunksChanged || metaChanged) {
         if (chunksChanged) repository.saveChunks(resolved.state.chunks.values)
-        if (metaChanged) repository.saveGameMeta(resolved.state.meta)
+        if (metaChanged) repository.saveGameMeta(reconciledMeta)
         repository.flush()
     }
-    return resolved.state
+    return resolved.state.copy(meta = reconciledMeta)
 }
 
 /**

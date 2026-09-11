@@ -217,7 +217,8 @@ class GameViewModelTest {
 
         assertTrue(snapshot.chunks.containsKey(farCoord))
         assertEquals(farChunk, snapshot.chunks.getValue(farCoord))
-        assertEquals(4, snapshot.meta.flagsPlaced)
+        // Export recounts FLAGS from the board (no flagged cells in this fixture).
+        assertEquals(0, snapshot.meta.flagsPlaced)
         assertEquals(5f, snapshot.meta.viewportX)
         assertEquals(-2f, snapshot.meta.viewportY)
         assertEquals(2f, snapshot.meta.zoom)
@@ -281,11 +282,12 @@ class GameViewModelTest {
         viewModel.importSave(payload)
         advanceUntilIdle()
 
+        val healedMeta = importedMeta.copy(flagsPlaced = 1, selectorsCleared = 0)
         assertEquals(importedChunk, store.chunks[importedCoord])
         assertFalse(store.chunks.containsKey(oldCoord))
-        assertEquals(importedMeta, store.meta)
+        assertEquals(healedMeta, store.meta)
         assertTrue(viewModel.state.value.chunks.containsKey(importedCoord))
-        assertEquals(importedMeta.flagsPlaced, viewModel.state.value.meta.flagsPlaced)
+        assertEquals(healedMeta.flagsPlaced, viewModel.state.value.meta.flagsPlaced)
         assertEquals(importedMeta.viewportX, viewModel.state.value.meta.viewportX)
         assertEquals(importedMeta.zoom, viewModel.state.value.meta.zoom)
 
@@ -327,7 +329,8 @@ class GameViewModelTest {
         assertEquals(durableAfterStart, store.chunks[keepCoord])
         assertEquals(metaAfterStart, store.meta)
         assertTrue(viewModel.state.value.chunks.containsKey(keepCoord))
-        assertEquals(3, viewModel.state.value.meta.flagsPlaced)
+        // Cold start heals FLAGS to the board (fixture has none flagged).
+        assertEquals(0, viewModel.state.value.meta.flagsPlaced)
 
         viewModel.viewModelScope.cancel()
         advanceUntilIdle()
