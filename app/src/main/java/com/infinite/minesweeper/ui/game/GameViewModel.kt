@@ -62,6 +62,20 @@ class GameViewModel @Inject constructor(
     val saveTransferMessages: SharedFlow<SaveTransferMessage> = _saveTransferMessages.asSharedFlow()
 
     private val viewport = MutableStateFlow(ViewportSnapshot(0f, 0f, 1f))
+
+    private val _sessionId = MutableStateFlow(NO_SESSION)
+
+    /**
+     * Bumps every time a session's state and viewport have been (re)loaded from storage (cold
+     * start, reset, import). The UI keys its viewport restore on this so it never draws the board
+     * before it has moved to the saved position.
+     */
+    val sessionId: StateFlow<Int> = _sessionId.asStateFlow()
+
+    private val _boardReady = MutableStateFlow(false)
+
+    /** True once the UI has drawn its first fully hydrated frame; the splash screen waits on it. */
+    val boardReady: StateFlow<Boolean> = _boardReady.asStateFlow()
     private var engine: DefaultGameEngine? = null
     private var persistence: GamePersistenceCoordinator? = null
     private var binding: InputBinding = InputBinding.Default
@@ -91,11 +105,6 @@ class GameViewModel @Inject constructor(
     private suspend fun startSession(fresh: Boolean) {
         val generator = SeededMineGenerator(WORLD_SEED)
         val restored = if (fresh) GameState() else restoreGameState(repository, generator)
-        viewport.value = ViewportSnapshot(
-            centerX = restored.meta.viewportX,
-            centerY = restored.meta.viewportY,
-            zoom = restored.meta.zoom,
-        )
         val createdEngine = DefaultGameEngine(
             mineGenerator = generator,
             initialState = restored,
@@ -104,8 +113,16 @@ class GameViewModel @Inject constructor(
         )
         createdEngine.limitCascadeToSelector =
             inputBindingPreferences.limitCascadeToSelector.first()
+        // No suspension point from here through the session bump: the UI must not observe the new
+        // state with a stale viewport (or push its own stale viewport over the restored one).
+        viewport.value = ViewportSnapshot(
+            centerX = restored.meta.viewportX,
+            centerY = restored.meta.viewportY,
+            zoom = restored.meta.zoom,
+        )
         engine = createdEngine
         _state.value = createdEngine.state.value
+        _sessionId.value += 1
 
         val job = SupervisorJob(viewModelScope.coroutineContext[Job])
         sessionJob = job
@@ -257,6 +274,13 @@ class GameViewModel @Inject constructor(
         viewModelScope.launch { activeEngine.resetSolvedChunk(coord) }
     }
 
+    /** The authoritative viewport: the restored one until the UI takes over, then the live one. */
+    fun currentViewport(): ViewportSnapshot = viewport.value
+
+    fun markBoardReady() {
+        _boardReady.value = true
+    }
+
     fun updateViewport(centerX: Double, centerY: Double, zoom: Double) {
         viewport.value = ViewportSnapshot(
             centerX = centerX.toFloat(),
@@ -272,10 +296,10 @@ class GameViewModel @Inject constructor(
      * surround watcher can soft-resolve without the solved ring having been evicted out from
      * under it. Persisted locks outside the live map are pulled in for the same reason.
      */
-    fun syncVisibleWindow(keep: Set<ChunkCoord>) {
-        val activeEngine = engine ?: return
+    fun syncVisibleWindow(keep: Set<ChunkCoord>): Job? {
+        val activeEngine = engine ?: return null
         viewportSyncJob?.cancel()
-        viewportSyncJob = viewModelScope.launch {
+        return viewModelScope.launch {
             val currentChunks = activeEngine.state.value.chunks
             val persistedLocks = repository.getLockedChunks()
             val locked = currentChunks.filterValues { it.status == ChunkStatus.LOCKED }.keys +
@@ -298,7 +322,7 @@ class GameViewModel @Inject constructor(
                 if (stillMissing.isNotEmpty()) putAll(repository.getChunks(stillMissing))
             }
             activeEngine.syncWindow(effectiveKeep, hydrated)
-        }
+        }.also { viewportSyncJob = it }
     }
 
     /**
@@ -306,10 +330,10 @@ class GameViewModel @Inject constructor(
      * never expanded into millions of [ChunkCoord] objects, and gameplay-only repair is deferred
      * until the user zooms back into the interactive detail renderer.
      */
-    fun syncOverviewWindow(bounds: ChunkBounds) {
-        val activeEngine = engine ?: return
+    fun syncOverviewWindow(bounds: ChunkBounds): Job? {
+        val activeEngine = engine ?: return null
         viewportSyncJob?.cancel()
-        viewportSyncJob = viewModelScope.launch {
+        return viewModelScope.launch {
             val persisted = repository.getChunksInBounds(
                 minCx = bounds.minCx,
                 minCy = bounds.minCy,
@@ -332,7 +356,7 @@ class GameViewModel @Inject constructor(
                 repository.saveChunks(evicted.mapNotNull { currentChunks[it] })
             }
             activeEngine.syncOverviewWindow(keep = keep, hydrated = hydrated)
-        }
+        }.also { viewportSyncJob = it }
     }
 
     /**
@@ -373,6 +397,8 @@ class GameViewModel @Inject constructor(
         engine?.reconcileProgress(durable)
     }
 }
+
+private const val NO_SESSION = 0
 
 /** One-shot feedback for Settings export/import (success or failure text). */
 sealed interface SaveTransferMessage {

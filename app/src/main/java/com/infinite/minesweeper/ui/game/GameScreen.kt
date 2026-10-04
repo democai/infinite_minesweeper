@@ -17,6 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -26,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
@@ -38,6 +40,7 @@ import com.infinite.minesweeper.core.coords.cellToChunk
 import com.infinite.minesweeper.core.model.ChunkCoord
 import com.infinite.minesweeper.core.model.GameEvent
 import com.infinite.minesweeper.ui.board.BoardEffect
+import com.infinite.minesweeper.ui.board.ChunkBounds
 import com.infinite.minesweeper.ui.board.ViewportBoardCanvas
 import com.infinite.minesweeper.ui.board.LodRenderer
 import com.infinite.minesweeper.ui.board.computeMinZoomFromExploredBounds
@@ -50,6 +53,7 @@ import com.infinite.minesweeper.ui.theme.BoardDimens
 import com.infinite.minesweeper.ui.theme.BoardPalette
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 
 @Composable
@@ -61,28 +65,76 @@ fun GameScreen(
     val longPressDuration by viewModel.inputBindingPreferences.longPressDuration
         .collectAsStateWithLifecycle(initialValue = LongPressDuration.Default)
     val viewportState = rememberViewportState()
-    var viewportRestored by rememberSaveable { mutableStateOf(false) }
     var showSettings by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = showSettings) { showSettings = false }
 
-    LaunchedEffect(state.isProcessing, viewportRestored) {
-        if (!state.isProcessing && !viewportRestored) {
-            viewportState.moveTo(
-                centerX = state.meta.viewportX.toDouble(),
-                centerY = state.meta.viewportY.toDouble(),
-                zoom = state.meta.zoom.toDouble(),
+    val density = LocalDensity.current
+    val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
+
+    // The board stays undrawn until the saved viewport has been applied and the chunks under it
+    // are hydrated, so a cold start opens straight onto the last played position and zoom instead
+    // of flashing an empty board that only fills in on the first tap. The ViewModel outlives
+    // configuration changes but this ViewportState does not, hence the per-composition marker.
+    val sessionId by viewModel.sessionId.collectAsStateWithLifecycle()
+    var appliedSessionId by remember { mutableIntStateOf(0) }
+    val boardReady = sessionId > 0 && appliedSessionId == sessionId
+    var lastSynced by remember { mutableStateOf<Pair<ChunkBounds, Boolean>?>(null) }
+    val windowInfo = LocalWindowInfo.current
+    LaunchedEffect(sessionId) {
+        if (sessionId == 0) return@LaunchedEffect
+        // The board canvas may not be laid out yet (or at all, if settings was restored open), so
+        // size the viewport from the window and let the canvas refine it later.
+        val size = snapshotFlow { windowInfo.containerSize }
+            .first { it.width > 0 && it.height > 0 }
+        viewportState.updateViewportSize(size.width.toDouble(), size.height.toDouble())
+        val saved = viewModel.currentViewport()
+        val restoredMeta = viewModel.state.value.meta
+        // Raise the zoom-out floor first: moveTo clamps to it, and the explored extent is what
+        // allows the saved (zoomed-out) level in the first place.
+        viewportState.updateMinZoom(
+            computeMinZoomFromExploredBounds(
+                viewportWidthPx = viewportState.viewportWidthPx,
+                viewportHeightPx = viewportState.viewportHeightPx,
+                baseCellSizePx = baseCellSizePx,
+                hasExploredBounds = restoredMeta.hasExploredBounds,
+                exploredMinCx = restoredMeta.exploredMinCx,
+                exploredMaxCx = restoredMeta.exploredMaxCx,
+                exploredMinCy = restoredMeta.exploredMinCy,
+                exploredMaxCy = restoredMeta.exploredMaxCy,
+            ),
+        )
+        viewportState.moveTo(
+            centerX = saved.centerX.toDouble(),
+            centerY = saved.centerY.toDouble(),
+            zoom = saved.zoom.toDouble(),
+        )
+        val bounds = viewportState.visibleChunkBounds(
+            baseCellSizePx = baseCellSizePx,
+            renderMarginChunks = DEFAULT_RETENTION_MARGIN_CHUNKS,
+        )
+        if (bounds != null) {
+            val useLod = LodRenderer.shouldUseLod(
+                BoardDimens.BaseCellSizeDp * viewportState.zoom.toFloat(),
             )
-            viewportRestored = true
+            lastSynced = bounds to useLod
+            val sync = if (useLod) {
+                viewModel.syncOverviewWindow(bounds)
+            } else {
+                viewModel.syncVisibleWindow(bounds.toSet())
+            }
+            sync?.join()
         }
+        appliedSessionId = sessionId
+        viewModel.markBoardReady()
     }
-    LaunchedEffect(viewportState) {
+    LaunchedEffect(viewportState, boardReady) {
+        if (!boardReady) return@LaunchedEffect
         snapshotFlow { Triple(viewportState.centerX, viewportState.centerY, viewportState.zoom) }
             .collect { (x, y, zoom) -> viewModel.updateViewport(x, y, zoom) }
     }
 
-    val density = LocalDensity.current
-    val baseCellSizePx = with(density) { BoardDimens.BaseCellSizeDp.dp.toPx() }.toDouble()
-    LaunchedEffect(viewportState, baseCellSizePx) {
+    LaunchedEffect(viewportState, baseCellSizePx, boardReady) {
+        if (!boardReady) return@LaunchedEffect
         snapshotFlow {
             val bounds = viewportState.visibleChunkBounds(
                 baseCellSizePx = baseCellSizePx,
@@ -95,7 +147,13 @@ fun GameScreen(
         }
             .filterNotNull()
             .distinctUntilChanged()
-            .collect { (bounds, useLod) ->
+            .collect { key ->
+                // The restore above already synced this exact window.
+                if (key == lastSynced) {
+                    lastSynced = null
+                    return@collect
+                }
+                val (bounds, useLod) = key
                 if (useLod) {
                     viewModel.syncOverviewWindow(bounds)
                 } else {
@@ -174,13 +232,11 @@ fun GameScreen(
                 preferences = viewModel.inputBindingPreferences,
                 onResetGame = {
                     viewModel.resetGame()
-                    viewportRestored = false
                     showSettings = false
                 },
                 onExportSave = { viewModel.exportSave() },
                 onImportSave = { bytes -> viewModel.importSave(bytes) },
                 onImportApplied = {
-                    viewportRestored = false
                     showSettings = false
                 },
                 onTransferMessage = { text, isError ->
@@ -218,11 +274,12 @@ fun GameScreen(
 
     Box(modifier = modifier.fillMaxSize()) {
         ViewportBoardCanvas(
-            chunks = state.chunks.values,
+            chunks = if (boardReady) state.chunks.values else emptyList(),
             viewportState = viewportState,
             modifier = Modifier.fillMaxSize(),
-            onTap = { viewModel.dispatch(TapKind.TAP, it) },
+            onTap = { if (boardReady) viewModel.dispatch(TapKind.TAP, it) },
             onLongPress = { cell, position ->
+                if (!boardReady) return@ViewportBoardCanvas
                 if (viewModel.shouldOpenHintMenu(cell)) {
                     selectorMenu = cellToChunk(cell) to position
                 } else {

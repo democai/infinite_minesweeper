@@ -150,6 +150,28 @@ class GameViewModelTest {
     }
 
     @Test
+    fun coldStart_publishesSavedViewportAndBumpsSessionOnlyAfterItIsLoaded() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
+
+        val repository = InMemoryChunkRepository()
+        repository.saveGameMeta(GameMeta(viewportX = 812.5f, viewportY = -340f, zoom = 0.4f))
+
+        val viewModel = GameViewModel(repository, inputBindingPreferences())
+        assertEquals("no session before the saved game has loaded", 0, viewModel.sessionId.value)
+        advanceUntilIdle()
+
+        assertEquals(1, viewModel.sessionId.value)
+        val viewport = viewModel.currentViewport()
+        assertEquals(812.5f, viewport.centerX, 0f)
+        assertEquals(-340f, viewport.centerY, 0f)
+        assertEquals(0.4f, viewport.zoom, 0f)
+
+        viewModel.viewModelScope.cancel()
+        advanceUntilIdle()
+    }
+
+    @Test
     fun resetGame_wipesRepositoryAndReturnsToAFreshOriginState() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)

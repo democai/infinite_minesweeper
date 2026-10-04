@@ -25,8 +25,8 @@ just verify  # clean + test + build — the full gate
 Run a single test class or method directly with Gradle when iterating:
 
 ```
-./gradlew test --tests "com.infinite.minesweeper.core.engine.DefaultGameEngineTest"
-./gradlew test --tests "com.infinite.minesweeper.core.engine.DefaultGameEngineTest.someTestMethod"
+./gradlew testDebugUnitTest --tests "com.infinite.minesweeper.core.engine.DefaultGameEngineTest"
+./gradlew testDebugUnitTest --tests "com.infinite.minesweeper.core.engine.DefaultGameEngineTest.someTestMethod"
 ```
 
 No `.env` variables are required (`justfile` sets `dotenv-load := false`).

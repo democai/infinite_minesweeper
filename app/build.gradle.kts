@@ -15,14 +15,15 @@ plugins {
 val versionEpochSeconds = 1_720_000_000L // ~2024-07-05 UTC
 
 fun gitStdout(vararg args: String): String {
-    val process =
-        ProcessBuilder("git", *args)
-            .directory(rootProject.projectDir)
-            .redirectErrorStream(true)
-            .start()
-    val output = process.inputStream.bufferedReader().readText().trim()
-    check(process.waitFor() == 0 && output.isNotEmpty()) {
-        "git ${args.joinToString(" ")} failed: $output"
+    val result =
+        providers.exec {
+            commandLine("git", *args)
+            workingDir = rootProject.projectDir
+            isIgnoreExitValue = true
+        }
+    val output = result.standardOutput.asText.get().trim()
+    check(result.result.get().exitValue == 0 && output.isNotEmpty()) {
+        "git ${args.joinToString(" ")} failed: ${result.standardError.asText.get().trim()}"
     }
     return output
 }
@@ -104,6 +105,7 @@ kotlin {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

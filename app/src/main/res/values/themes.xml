@@ -6,4 +6,10 @@
         <item name="android:windowBackground">@color/board_background</item>
         <item name="android:colorBackground">@color/board_background</item>
     </style>
+
+    <!-- Launch theme: holds the system splash (board colour) until the saved viewport is drawn. -->
+    <style name="Theme.InfiniteMinesweeper.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/board_background</item>
+        <item name="postSplashScreenTheme">@style/Theme.InfiniteMinesweeper</item>
+    </style>
 </resources>
